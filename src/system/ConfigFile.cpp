@@ -383,15 +383,11 @@ void ConfigFile_EnsureExists(void)
         "; Wait for vblank on present. 0 = off (default, and what the original did\n"
         "; in a window): the engine paces itself to 33 ms per tick in software.\n"
         "VSync=%d\n"
-        "; Aspect ratio: 1 = Normal (4:3 with black bars), 3 = Widescreen (16:9\n"
-        "; pan-and-scan; the scene is cropped vertically to follow the player). Also in the F2\n"
-        "; Video Options menu.\n"
+        "; Aspect ratio: 1 = Normal (4:3 with black bars), 2 = Widescreen.\n"
         "Aspect=1\n"
-        "; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples. Also in the\n"
-        "; F2 Video Options menu.\n"
+        "; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples.\n"
         "MSAA=1\n"
-        "; 1 = CRT shader (CRT-Royale style scanlines, phosphor mask, curvature).\n"
-        "; Also in the F2 Video Options menu.\n"
+        "; 1 = CRT shader (CRT style scanlines, phosphor mask, curvature).\n"
         "CRT=0\n"
         "; 1 = interpolated 60fps: game logic stays at 30 ticks/s, an in-between\n"
         "; frame blends character and object movement.\n"
@@ -430,8 +426,6 @@ void ConfigFile_EnsureExists(void)
         ";            DC/ folder beside USA/ holding only the files it changes or\n"
         ";            adds; anything it does not carry falls back to the tree\n"
         ";            [Assets] Version selects.\n"
-        ";   SATURN, DS = folder names reserved; no code behind them yet.\n"
-        "Mode=%s\n"
         "; 1 = use the PS1 staff-credit overlay in the ending FMVs. DC enables it\n"
         "; automatically; OG leaves it off unless this key is set.\n"
         "Ps1EndingCredits=%d\n"
@@ -445,12 +439,10 @@ void ConfigFile_EnsureExists(void)
         "SkipUnskippableFmv=%d\n"
         "\n"
         "[Mods]\n"
-        "; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard\n"
-        "; tunnels on (STAGE3), as on the Saturn; the mansion Hunters stay.\n"
+        "; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.\n"
         "; Loads enemy/em1016.emd and em1116.emd (tools/saturn/tick2pc.py), the\n"
         "; Tick's close-range decapitation and sounds (sound/TK_*.wav from\n"
         "; tools/saturn/ticksnd.py). Anything missing falls back to the Hunter.\n"
-        "; OG mode only.\n"
         "Ticks=0\n"
         "; Option Mode > GAMEPLAY: 1 = on.\n"
         "QuickKnife=0\n"
@@ -458,14 +450,7 @@ void ConfigFile_EnsureExists(void)
         "Reload=0\n"
         "\n"
         "[BattleGame]\n"
-        "; The Sega Saturn Battle Game (title menu, BATTLE GAME). Like the Saturn,\n"
-        "; it appears once the game has been finished ([Player] ClearCount > 0).\n"
-        "; 1 = always offer it. Needs data/t_battle.tim and battle/ROOM80x0.RDT\n"
-        "; (tools/saturn/battle_title.py, battle2pc.py). OG mode, USA assets.\n"
         "AlwaysUnlocked=0\n"
-        "; Stage 15 ending shot (camera circles the player against black).\n"
-        "; 0 = keep the room view so the boss's death plays out on screen.\n"
-        "EndingShot=1\n"
         "\n"
         "[Debug]\n"
         "; Master switch for the port-added debug features: F1 debug menu, F6\n"
@@ -488,7 +473,6 @@ void ConfigFile_EnsureExists(void)
         (unsigned)g_dwBitDepth, g_bVSync ? 1 : 0,
         (unsigned)g_dwMusicVolume, (unsigned)g_dwEffectsVolume, (unsigned)g_dwVoiceVolume,
         (GetAssetVersion() == 1) ? "JPN" : "USA",
-        GameModeName(g_GameMode),
         g_bPs1EndingCredits ? 1 : 0,
         g_bPs1FmvSubtitles ? 1 : 0,
         g_bSkipUnskippableFmv ? 1 : 0,
@@ -519,10 +503,15 @@ BOOL ConfigFile_Load(void)
     g_dwScreenHeight = (DWORD)ReadInt(path, "Display", "Height", (int)g_dwScreenHeight);
     g_dwBitDepth     = (DWORD)ReadInt(path, "Display", "BitDepth", (int)g_dwBitDepth);
     g_bVSync         = ReadInt(path, "Display", "VSync", g_bVSync ? 1 : 0) ? TRUE : FALSE;
-    // Port-added (Video Options menu): MARNI_ASPECT_* 0..2, anything else = 0.
-    g_dwAspectMode   = (DWORD)ReadInt(path, "Display", "Aspect", (int)g_dwAspectMode);
-    // Only Normal (4:3) and Widescreen are offered now; anything else is Normal.
-    if (g_dwAspectMode != MARNI_ASPECT_WIDE) g_dwAspectMode = MARNI_ASPECT_4_3;
+    // Port-added (Video Options menu): Aspect 1 = Normal (4:3), 2 = Widescreen.
+    // 3 is the old Widescreen value and still selects it; anything else is
+    // Normal. The file value is not the MARNI_ASPECT_* index.
+    {
+        const int aspect = ReadInt(path, "Display", "Aspect",
+                                   g_dwAspectMode == MARNI_ASPECT_WIDE ? 2 : 1);
+        g_dwAspectMode = (aspect == 2 || aspect == 3) ? MARNI_ASPECT_WIDE
+                                                      : MARNI_ASPECT_4_3;
+    }
     // Port-added (Video Options menu): MSAA 1/2/4/8 (anything else = off), CRT.
     g_dwMsaa         = (DWORD)ReadInt(path, "Display", "MSAA", (int)g_dwMsaa);
     if (g_dwMsaa != 2 && g_dwMsaa != 4 && g_dwMsaa != 8) g_dwMsaa = 1;
@@ -711,7 +700,7 @@ void ConfigFile_Save(void)
     snprintf(values[6], sizeof(values[6]), "%u", (unsigned)g_dwClearCount);
     snprintf(values[7], sizeof(values[7]), "%s", keyHex);
     snprintf(values[8], sizeof(values[8]), "%s", sideHex);
-    snprintf(values[9], sizeof(values[9]), "%u", (unsigned)g_dwAspectMode);
+    snprintf(values[9], sizeof(values[9]), "%d", g_dwAspectMode == MARNI_ASPECT_WIDE ? 2 : 1);
     snprintf(values[10], sizeof(values[10]), "%u", (unsigned)g_dwMsaa);
     snprintf(values[11], sizeof(values[11]), "%d", g_bCrtShader ? 1 : 0);
     snprintf(values[12], sizeof(values[12]), "%u", (unsigned)g_dwMusicVolume);

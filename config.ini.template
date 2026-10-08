@@ -19,15 +19,11 @@ BitDepth=32
 ; Wait for vblank on present. 0 = off (default, and what the original did
 ; in a window): the engine paces itself to 33 ms per tick in software.
 VSync=0
-; How the 4:3 picture fills the screen: 0 = stretch to fill, 1 = 4:3 with
-; black bars, 2 = 4:3 at a whole-number scale. Also in the F2 Video Options
-; menu.
+; Aspect ratio: 1 = Normal (4:3 with black bars), 2 = Widescreen.
 Aspect=1
-; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples. Also in the F2 Video
-; Options menu.
+; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples.
 MSAA=1
-; 1 = CRT shader (CRT-Royale style scanlines, phosphor mask, curvature). Also
-; in the F2 Video Options menu.
+; 1 = CRT shader (CRT style scanlines, phosphor mask, curvature).
 CRT=0
 ; 1 = interpolated 60fps (blends movement between game ticks).
 Interpolate60=0
@@ -57,7 +53,6 @@ Path=
 
 [Game]
 ; OG = the PC release (default); DC = the PS1 Director's Cut overlay.
-Mode=OG
 ; DC enables the PS1 staff-credit overlay automatically. Set this to 1 to use it
 ; with OG assets when DATA\STAFF.STF, DATA\STAFF2.STF and DATA\BIO.TIM are present.
 Ps1EndingCredits=0
@@ -66,22 +61,16 @@ Ps1EndingCredits=0
 SkipUnskippableFmv=0
 
 [Mods]
-; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard tunnels on
-; (STAGE3), as on the Saturn; the mansion Hunters stay. Loads enemy/em1016.emd
-; and em1116.emd (tools/saturn/tick2pc.py), the Tick's close-range
-; decapitation and sounds (sound/TK_*.wav from
+; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.
+; Loads enemy/em1016.emd and em1116.emd (tools/saturn/tick2pc.py), the Tick's
+; close-range decapitation and sounds (sound/TK_*.wav from
 ; tools/saturn/ticksnd.py). Anything missing falls back to the Hunter.
-; OG mode only.
 Ticks=0
 QuickKnife=0
 QuickTurn=0
 Reload=0
 
 [BattleGame]
-; The Sega Saturn Battle Game (title menu, BATTLE GAME). Like the Saturn, it
-; appears once the game has been finished ([Player] ClearCount > 0).
-; 1 = always offer it. Needs data/t_battle.tim and battle/ROOM80x0.RDT
-; (tools/saturn/battle_title.py, battle2pc.py). OG mode, USA assets.
 AlwaysUnlocked=0
 
 [Debug]

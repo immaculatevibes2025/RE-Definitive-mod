@@ -407,7 +407,7 @@ const float* Interp60_Matrix(const unsigned char* objData, const float* cur, flo
 // Draws everything queued for this tick (background quad already inserted,
 // pending sprites already sorted). Leaves the queues intact.
 // ============================================================================
-// 16:9 pan-and-scan ([Display] Aspect=3, port-added mod).
+// 16:9 pan-and-scan ([Display] Aspect=2, port-added mod).
 //
 // The UI keeps the 4:3 content box. While a room background is on screen the
 // scene layers (background, room lighting, masks, models, effects) are drawn
