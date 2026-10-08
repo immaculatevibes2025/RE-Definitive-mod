@@ -10,7 +10,6 @@
 > **Added in this fork** (everything is off by default and set in `config.ini` or the in-game Option Mode):
 > - Sega Saturn content: the Battle Game, Saturn Ticks (in place of the cave Hunters),
 >   Saturn-style Tick grab and decapitation, Saturn Tick sounds (`tools/saturn/`)
-> - RE 1.5 Man Spider option for the Battle Game boss (`tools/saturn/manspider2pc.py`)
 > - Video options: interpolated 60fps, 16:9 widescreen (pan-and-scan), CRT shader, MSAA
 > - Gameplay options: Quick Knife, Quick Turn, Reload button
 >
