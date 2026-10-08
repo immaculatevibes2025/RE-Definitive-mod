@@ -75,10 +75,26 @@ static void wardrobe_set_message(int slot)
     *(unsigned short*)(e + 6) = 0;
 }
 
+// The Saturn outfit only exists once the Saturn Extractor has built it from
+// the player's own Saturn disc (enemy/em1034/em1035, st1034/st1035 in the DC).
+// Without it the third rack stays the room's ordinary "just clothes" one.
+static int saturn_outfit_available(void)
+{
+    static int s_have[2] = { -1, -1 };
+    const int jill = g_playerEntity.id & 1;
+    if (s_have[jill] < 0) {
+        const char* path = g_bDcMode ? (jill ? "enemy/st1035.emd" : "enemy/st1034.emd")
+                                     : (jill ? "enemy/em1035.emd" : "enemy/em1034.emd");
+        s_have[jill] = mod_asset_exists(path) ? 1 : 0;
+    }
+    return s_have[jill];
+}
+
 static void wardrobe_saturn_setup(void)
 {
     g_wardrobeSaturnPending = 0;
     if (!wardrobe_room()) return;
+    if (!saturn_outfit_available() && g_bCostumeVariant != 2) return;   // not extracted
     if (*(unsigned int*)&g_RoomActionTable[3 * 0xc + 8] == 0) return;   // slot 3 not built
     if (g_bCostumeVariant == 2) {
         // In the Saturn outfit: both PC closets open, the Saturn rack is "worn".

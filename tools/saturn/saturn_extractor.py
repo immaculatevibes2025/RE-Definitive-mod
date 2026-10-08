@@ -130,6 +130,10 @@ def out_dir(usa, name):
 
 # --------------------------------------------------------------------------
 def run(disc_path, game, log):
+    if not os.path.exists(disc_path):
+        raise ValueError("Cannot find the disc image: %s" % disc_path)
+    if not os.path.isdir(game):
+        raise ValueError("Cannot find the game folder: %s" % game)
     usa = find_ci(game, "USA") or (game if find_ci(game, "STAGE1") else None)
     if usa is None:
         raise ValueError("No USA folder found in the PC game folder.")
@@ -283,8 +287,40 @@ def gui():
     root.mainloop()
 
 
+def _console_stdout():
+    """The windowed .exe starts with no sys.stdout; when a parent program
+    (the asset migrator's Saturn tab) passes a pipe, write to that."""
+    if sys.stdout is not None or os.name != "nt":
+        return
+    try:
+        import ctypes
+        import msvcrt
+        h = ctypes.windll.kernel32.GetStdHandle(-11)      # STD_OUTPUT_HANDLE
+        if h not in (0, -1, None):
+            fd = msvcrt.open_osfhandle(h, os.O_WRONLY | os.O_TEXT)
+            sys.stdout = sys.stderr = open(fd, "w", buffering=1, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def cli(disc, game):
+    _console_stdout()
+
+    def log(msg):
+        if msg and sys.stdout is not None:
+            print(msg, flush=True)
+    try:
+        run(disc, game, log)
+    except FileNotFoundError as e:
+        log("ERROR: this disc is missing %s - is it Resident Evil for the Saturn?" % e)
+        sys.exit(1)
+    except Exception as e:
+        log("ERROR: %s" % e)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        run(sys.argv[1], sys.argv[2], print)
+        cli(sys.argv[1], sys.argv[2])
     else:
         gui()

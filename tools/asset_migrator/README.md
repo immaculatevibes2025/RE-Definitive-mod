@@ -121,6 +121,14 @@ copy would never be read; that is the one file the DC tab writes outside
 `<target>/DC`. `Verify` runs
 the coverage and background checks afterwards.
 
+### Saturn Extras (fork addition)
+
+Builds the Sega Saturn extras (Ticks, Zombie Wesker, the Saturn outfits, the Battle Game
+rooms and music, the Tick sounds, and the title-menu / Option Mode art) from the player's
+own *Resident Evil* Saturn disc image (`.cue`, `.bin` or `.iso`) into `<game folder>/USA`.
+The tab runs `RE1 Saturn Extractor.exe` (built by `tools/saturn/build_exe.bat`), which must
+sit next to `re1_asset_migrator.exe` (or in a `saturn` folder beside it), and shows its log.
+
 ## Requirements
 
 - Qt 6.8 (MSVC 2022 64-bit kit; `C:\Qt\6.8.3\msvc2022_64` by default).

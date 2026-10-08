@@ -172,8 +172,11 @@ int battle_title_option_available(void)
     }
     static int s_dataChecked = -1;
     if (s_dataChecked < 0) {
+        // Built by the Saturn Extractor from the player's own Saturn disc;
+        // without it BATTLE GAME is left off the title menu.
         s_dataChecked = mod_asset_exists("data/t_battle.tim") &&
-                        mod_asset_exists("battle/ROOM8010.RDT");
+                        mod_asset_exists("battle/ROOM8010.RDT") &&
+                        mod_asset_exists("battle/ROOM80F0.RDT");
     }
     return s_dataChecked;
 }

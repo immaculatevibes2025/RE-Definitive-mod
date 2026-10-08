@@ -154,6 +154,21 @@ jobs:
       - name: Build
         run: cmake --build tools/asset_migrator/build
 
+      # Fork: the Saturn Extractor (tools/saturn) as a one-file .exe, shipped
+      # next to the migrator for its Saturn Extras tab.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the Saturn Extractor
+        working-directory: tools/saturn
+        run: |
+          python -m pip install numpy pillow pyinstaller
+          $data = @()
+          foreach ($f in 'battle2pc.py','battle_title.py','title_menu.py','option_tabs.py','satbgm.py','satcostume.py','tick2pc.py','ticksnd.py') { $data += @('--add-data', "$f;.") }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image @data saturn_extractor.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+
       - name: Deploy Qt runtime and stage release files
         id: stage
         run: |
@@ -181,6 +196,7 @@ jobs:
           # The headless core verifier the README documents.
           Copy-Item "tools/asset_migrator/build/re1am_selftest.exe" $out
           Copy-Item "tools/asset_migrator/README.md" $out
+          Copy-Item "tools/saturn/dist/RE1 Saturn Extractor.exe" $out
           Copy-Item "LICENSE" $out
           Compress-Archive -Path "$out/*" -DestinationPath "$name.zip"
           "zip=$name.zip" >> $env:GITHUB_OUTPUT
