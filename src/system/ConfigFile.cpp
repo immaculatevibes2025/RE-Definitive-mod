@@ -417,6 +417,7 @@ void ConfigFile_EnsureExists(void)
         "Path=\n"
         "\n"
         "[Game]\n"
+        "Mode=%s\n"
         "; Which release's content to run. This one key selects BOTH the code\n"
         "; branches and the asset overlay folder searched ahead of the [Assets]\n"
         "; tree, so the two can never disagree.\n"
@@ -473,6 +474,7 @@ void ConfigFile_EnsureExists(void)
         (unsigned)g_dwBitDepth, g_bVSync ? 1 : 0,
         (unsigned)g_dwMusicVolume, (unsigned)g_dwEffectsVolume, (unsigned)g_dwVoiceVolume,
         (GetAssetVersion() == 1) ? "JPN" : "USA",
+        GameModeName(g_GameMode),
         g_bPs1EndingCredits ? 1 : 0,
         g_bPs1FmvSubtitles ? 1 : 0,
         g_bSkipUnskippableFmv ? 1 : 0,

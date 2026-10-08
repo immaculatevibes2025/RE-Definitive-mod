@@ -52,6 +52,7 @@ Version=USA
 Path=
 
 [Game]
+Mode=OG
 ; OG = the PC release (default); DC = the PS1 Director's Cut overlay.
 ; DC enables the PS1 staff-credit overlay automatically. Set this to 1 to use it
 ; with OG assets when DATA\STAFF.STF, DATA\STAFF2.STF and DATA\BIO.TIM are present.
