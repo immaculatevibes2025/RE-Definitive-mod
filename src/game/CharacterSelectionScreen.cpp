@@ -8,6 +8,7 @@
 #include "SFXIds.h"
 #include <cstdio>
 #include "../system/AssetPath.h"
+#include "BattleGame.h"       // g_battleActive (Saturn Battle Game mod)
 
 // ============================================================================
 // Forward declarations for external functions
@@ -699,12 +700,24 @@ case_6:
             g_SelectedCharactedId = g_selSelected;
             if (g_selSelected != 0) {
                 g_main_state_flags |= MSF_CHAR_VARIANT;
+            } else {
+                // Port fix: the bit survives the title (MSF_GAMESTART_KEEP_MASK),
+                // so a Chris game after a Jill one loaded Jill's room files.
+                g_main_state_flags &= ~MSF_CHAR_VARIANT;
             }
             g_bGameActive = 2;
             nullsub_0047eb80();
             cleanup_texture_slot(12);
             cleanup_texture_slot(13);
             cleanup_texture_slot(14);
+            if (g_battleActive) {
+                // Mod: Saturn Battle Game - straight in, no opening movie.
+                sounds_reset();
+                nullsub_0047eb80();
+                Task_sleep(1);
+                Task_chain((void*)game_start);
+                return;
+            }
             DisplayIntroAndStartGame();
             return;
 

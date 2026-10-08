@@ -1,6 +1,7 @@
 // Rendering.cpp - Frame rendering, present, sprite drawing
 // All functions decompiled from Ghidra with original addresses
 #include "../Globals.h"
+extern int g_battleEndingCam;      // BattleGame.cpp (Saturn Battle Game mod)
 #include "../platform/platform.h"
 #include "../DebugPrint.h"
 #include "../marni/MarniSystem.h"
@@ -338,6 +339,252 @@ void QueueTexturedSprite(float gameX, float gameY, float gameW, float gameH,
 }
 
 // ============================================================================
+// Interpolated 60fps mode ([Display] Interpolate60, port-added).
+//
+// The game logic stays at its 30 ticks/s. Each tick FrameRateGovernor draws
+// the queued scene twice: first with every 3D object's model->view transform
+// half-way between last tick's and this tick's, presented at the start of the
+// tick, then the real frame ~16 ms later. Backgrounds, masks and 2D sprites
+// are the same in both. Only gameplay (the 33 ms pacing path) is affected.
+// ============================================================================
+#include <unordered_map>
+#include <cmath>
+#include <cstring>
+BOOL g_bInterpolate60 = FALSE;
+
+namespace {
+struct InterpRec { float m[16]; unsigned int tick; };
+std::unordered_map<const unsigned char*, InterpRec> s_interpPrev;
+std::unordered_map<const unsigned char*, InterpRec> s_interpCur;
+unsigned int s_interpTick = 0;
+bool  s_interpBlendPass = false;   // drawing the in-between frame
+bool  s_interpSceneOk  = false;    // same room/camera as last tick
+int   s_interpStage = -1, s_interpRoom = -1, s_interpCam = -1;
+
+bool interp_lerp(const float* a, const float* b, float* out)
+{
+    // Large jumps (teleports, camera cuts, slot reuse) are not interpolated.
+    float dx = b[12] - a[12], dy = b[13] - a[13], dz = b[14] - a[14];
+    if (dx * dx + dy * dy + dz * dz > 1500.0f * 1500.0f) return false;
+    for (int r = 0; r < 3; r++) {
+        const float* ra = a + r * 4;
+        const float* rb = b + r * 4;
+        float la = sqrtf(ra[0]*ra[0] + ra[1]*ra[1] + ra[2]*ra[2]);
+        float lb = sqrtf(rb[0]*rb[0] + rb[1]*rb[1] + rb[2]*rb[2]);
+        if (la < 1e-6f || lb < 1e-6f) return false;
+        float d = (ra[0]*rb[0] + ra[1]*rb[1] + ra[2]*rb[2]) / (la * lb);
+        if (d < 0.5f) return false;   // > 60 degrees in one tick: a snap
+        float* ro = out + r * 4;
+        ro[0] = (ra[0] + rb[0]) * 0.5f;
+        ro[1] = (ra[1] + rb[1]) * 0.5f;
+        ro[2] = (ra[2] + rb[2]) * 0.5f;
+        float lo = sqrtf(ro[0]*ro[0] + ro[1]*ro[1] + ro[2]*ro[2]);
+        float want = (la + lb) * 0.5f;
+        if (lo > 1e-6f) { float k = want / lo; ro[0] *= k; ro[1] *= k; ro[2] *= k; }
+        ro[3] = (ra[3] + rb[3]) * 0.5f;
+    }
+    for (int i = 12; i < 16; i++) out[i] = (a[i] + b[i]) * 0.5f;
+    return true;
+}
+} // namespace
+
+const float* Interp60_Matrix(const unsigned char* objData, const float* cur, float* tmp)
+{
+    if (!g_bInterpolate60) return cur;
+    if (!s_interpBlendPass) {
+        // Real frame: remember this tick's transform for the next tick.
+        InterpRec& r = s_interpCur[objData];
+        memcpy(r.m, cur, sizeof(r.m));
+        r.tick = s_interpTick;
+        return cur;
+    }
+    if (!s_interpSceneOk) return cur;
+    auto it = s_interpPrev.find(objData);
+    if (it == s_interpPrev.end() || it->second.tick + 1 != s_interpTick) return cur;
+    return interp_lerp(it->second.m, cur, tmp) ? tmp : cur;
+}
+
+// Draws everything queued for this tick (background quad already inserted,
+// pending sprites already sorted). Leaves the queues intact.
+// ============================================================================
+// 16:9 pan-and-scan ([Display] Aspect=3, port-added mod).
+//
+// The UI keeps the 4:3 content box. While a room background is on screen the
+// scene layers (background, room lighting, masks, models, effects) are drawn
+// through a viewport that scales the 4:3 picture to the full buffer width and
+// crops it vertically; the crop follows the player. Full-screen fades and
+// tints go over the whole buffer. Everything is the same draw calls - only
+// the viewport changes - so every scene layer stays aligned.
+// ============================================================================
+extern int ProjectEffectSprite(SVECTOR* world, int* outxy);   // GteMatrix.cpp 0x0040aa50
+int g_wideGameLoopStamp = -100;     // GameLoop.cpp: g_numFramesRendered of the last gameplay frame
+static bool  s_wideActive = false;   // this frame draws the scene widescreen
+static float s_widePan    = -1.0f;   // logical lines cropped off the top
+static int   s_wideKey    = -1;      // stage/room/camera the pan belongs to
+
+static void Widescreen_UpdatePan(void)
+{
+    MarniDX* dx = Marni_DX();
+    if (dx == NULL) return;
+    const float visible = dx->WideVisibleLines();
+    const float maxPan  = 240.0f - visible;
+    if (maxPan <= 0.0f) { s_widePan = 0.0f; return; }
+
+    // Project the player's chest through the room camera - the same pipe the
+    // effect sprites use - saving the pipe so nothing else sees the change.
+    int savedM[9], savedT[3];
+    memcpy(savedM, g_fixedPointPipeMatrix, sizeof(savedM));
+    memcpy(savedT, g_fixedPointPipeTranslation, sizeof(savedT));
+    GetMatrixTranslation(&g_RoomCameraData);
+    SetGlobalScaledRotationMatrix(&g_RoomCameraData);
+    SVECTOR sv;
+    sv.x = g_playerEntity.position.x;
+    sv.y = (short)(g_playerEntity.position.y - 900);
+    sv.z = g_playerEntity.position.z;
+    int xy = 0;
+    const int depth = ProjectEffectSprite(&sv, &xy);
+    memcpy(g_fixedPointPipeMatrix, savedM, sizeof(savedM));
+    memcpy(g_fixedPointPipeTranslation, savedT, sizeof(savedT));
+
+    const int key = ((int)g_stageId << 16) | ((int)g_roomId << 8) | (int)g_roomCameraId;
+    float target = (s_widePan < 0.0f) ? maxPan * 0.5f : s_widePan;
+    if (depth > 0) {
+        const float sy = (float)(short)((unsigned int)xy >> 16);
+        target = sy - visible * 0.5f;
+    }
+    if (target < 0.0f)   target = 0.0f;
+    if (target > maxPan) target = maxPan;
+
+    if (key != s_wideKey || s_widePan < 0.0f) {
+        s_widePan = target;              // camera cut: snap
+        s_wideKey = key;
+    } else {
+        s_widePan += (target - s_widePan) * 0.12f;
+    }
+}
+
+static inline void Widescreen_Viewport(int mode)
+{
+    if (!s_wideActive) return;
+    MarniDX* dx = Marni_DX();
+    if (dx) dx->SetViewportMode(mode, s_widePan < 0.0f ? 0.0f : s_widePan);
+}
+
+static void DrawQueuedScene(void)
+{
+    // 0x10000+ command sprites are full-screen 2D pages (died.tim): 4:3.
+    Widescreen_Viewport(MARNI_VP_CONTENT);
+    FlushSpriteCommandsRange(0x10000, 0xFFFFFFFFu);
+
+    Widescreen_Viewport(MARNI_VP_SCENE);
+
+    // Render high-depth pending sprites (background, room lighting).
+    // At/above this threshold are scene elements that must sit behind
+    // the 3D pass: the room BG (0xFFF), the death screen's black rect
+    // (0xFC00), the menu's window fills (2100). Below it are overlays,
+    // which are ordered against the command sprites further down.
+    //
+    // 0x800 was used here once: it moved the menu's black masking
+    // rects (980) into the on-top bucket, where they covered the
+    // frame, item icons and character portrait - only the text (also
+    // an overlay, drawn after them) stayed visible. That is what the
+    // interleaved pass below fixes properly: at 980 the masks cover
+    // the sliding file book and map pages (1060-1140) while the frame
+    // parts (820-964) and everything nearer still draw on top.
+    for (int i = 0; i < g_pendingSpriteCount; i++) {
+        if (g_pendingSprites[i].valid && g_pendingSprites[i].depth >= PENDING_SCENE_DEPTH) {
+            MarniDrawSprite(
+                g_pendingSprites[i].x, g_pendingSprites[i].y,
+                g_pendingSprites[i].w, g_pendingSprites[i].h,
+                g_pendingSprites[i].u0, g_pendingSprites[i].v0,
+                g_pendingSprites[i].u1, g_pendingSprites[i].v1,
+                g_pendingSprites[i].color,
+                g_pendingSprites[i].tex);
+        }
+    }
+
+    // Collision boundary overlay ([Debug] ShowCollision, F8) - drawn
+    // only while debug features are enabled (the flag is set from
+    // config.ini / the F8 toggle under the same gate, and the draw
+    // itself early-returns on it). Between the background and the 3D
+    // so characters occlude the outlines and it reads as geometry
+    // lying on the floor.
+    CollisionDebug_Draw();
+
+    // Render queued 3D TMD objects (entities, options-menu character)
+    FlushTmdObjects();
+
+    // Overlays, text, HUD and menus: the 4:3 box.
+    Widescreen_Viewport(MARNI_VP_CONTENT);
+
+    // Render command buffer sprites (game objects, title text, etc.).
+    // The >= 0x10000 half already drew before the TMD pass.
+    //
+    // An overlay whose depth falls INSIDE the command-sprite range has
+    // to be interleaved, not deferred to the pass below. Two cases:
+    //   * the file reader's fullscreen black (548) must cover the
+    //     pause-menu frame (command sprites at 1060-1140) while the
+    //     document page, its page arrows and the EXIT label (500-516)
+    //     draw on top of it;
+    //   * the pause menu's four black masking rects (980) must cover
+    //     the sliding file book / map pages (1060-1140) - otherwise
+    //     those show through the gaps between the frame panels - while
+    //     the frame parts (820-964), item icons, portrait and text all
+    //     stay above them.
+    // The pending list is already sorted far-to-near, so walking it and
+    // flushing the sprites behind each overlay reproduces the
+    // original's single ordering table.
+    //
+    // 500 is the floor because a command sprite's depthSort is
+    // depth*16 + 500: nothing from display_texture/draw_texture can
+    // land below it, so overlays under 500 (every screen fade, at
+    // 450-499) keep drawing after ALL of them exactly as before.
+    // Effect sprites used to be the one class that could sort lower;
+    // they are SPRITE_CLASS_EFFECT now and drew during the TMD pass, so
+    // this range sees nothing below 500 at all.
+    unsigned int spriteCursor = 0x10000;
+    for (int i = 0; i < g_pendingSpriteCount; i++) {
+        if (!g_pendingSprites[i].valid) continue;
+        unsigned int d = g_pendingSprites[i].depth;
+        if (d >= PENDING_SCENE_DEPTH || d < 500) continue;
+        FlushSpriteCommandsRange(d, spriteCursor);
+        spriteCursor = d;
+        MarniDrawSprite(
+            g_pendingSprites[i].x, g_pendingSprites[i].y,
+            g_pendingSprites[i].w, g_pendingSprites[i].h,
+            g_pendingSprites[i].u0, g_pendingSprites[i].v0,
+            g_pendingSprites[i].u1, g_pendingSprites[i].v1,
+            g_pendingSprites[i].color,
+            g_pendingSprites[i].tex);
+    }
+    FlushSpriteCommandsRange(0, spriteCursor);
+
+    // Full-screen fades, tints and letterbox bars: the whole buffer.
+    Widescreen_Viewport(MARNI_VP_FULL);
+    // Both range flushes above drew; clear the queue now (the original
+    // reset it inside the single flush). Without this the command
+    // buffer accumulates across frames and display_texture returns 0
+    // on overflow - every 2D effect stops rendering.
+
+    // Render the remaining low-depth pending sprites last (the screen
+    // fade overlays and colour tinting under depth 500; the
+    // 500-PENDING_SCENE_DEPTH band already drew, interleaved, above).
+    for (int i = 0; i < g_pendingSpriteCount; i++) {
+        if (g_pendingSprites[i].valid && g_pendingSprites[i].depth < 500) {
+            MarniDrawSprite(
+                g_pendingSprites[i].x, g_pendingSprites[i].y,
+                g_pendingSprites[i].w, g_pendingSprites[i].h,
+                g_pendingSprites[i].u0, g_pendingSprites[i].v0,
+                g_pendingSprites[i].u1, g_pendingSprites[i].v1,
+                g_pendingSprites[i].color,
+                g_pendingSprites[i].tex);
+        }
+    }
+
+    Widescreen_Viewport(MARNI_VP_CONTENT);
+}
+
+// ============================================================================
 // FrameRateGovernor (0x004973d0)
 // ============================================================================
 void FrameRateGovernor(void)
@@ -391,7 +638,25 @@ void FrameRateGovernor(void)
         if (g_ScreenAccessReady && g_RenderAccessReady) {
             MarniClear();
 
+            const int pendingBeforeBg = g_pendingSpriteCount;
             FUN_0040a8f0(NULL);
+
+            // 16:9 pan-and-scan only while the room background is on screen
+            // (gameplay); menus, inventory and full-screen pages stay 4:3.
+            {
+                MarniDX* dx = Marni_DX();
+                // g_bUseFrameSkip is 1 only in-game (SetFrameRateMode from
+                // g_bGameActive), so the title screen and its Options stay 4:3.
+                s_wideActive = dx != NULL && dx->GetAspectMode() == MARNI_ASPECT_WIDE &&
+                               g_bUseFrameSkip == 1 &&
+                               // the gameplay loop ran this tick: not the title,
+                               // options, character select or loading screens
+                               (g_numFramesRendered - g_wideGameLoopStamp) <= 2 &&
+                               (g_main_state_flags & (MSF_ROOM_TRANSITION |
+                                                      MSF_DOOR_TRANSITION)) == 0 &&
+                               g_pendingSpriteCount > pendingBeforeBg;
+                if (s_wideActive) Widescreen_UpdatePan();
+            }
 
             // Sort pending sprites by depth (descending: high depth first = behind, low depth last = on top)
             for (int i = 0; i < g_pendingSpriteCount - 1; i++) {
@@ -412,105 +677,45 @@ void FrameRateGovernor(void)
             // Effect sprites no longer pass through here at all - they are
             // SPRITE_CLASS_EFFECT and FlushTmdObjects interleaves them with the
             // entity triangles, so this range only ever sees NORMAL commands.
-            FlushSpriteCommandsRange(0x10000, 0xFFFFFFFFu);
+            // Interpolated 60fps: only on the 33 ms gameplay path, never while
+            // a menu, door or room transition owns the screen.
+            bool interp = g_bInterpolate60 && g_bUseFrameSkip == 1 && !g_DisablePad &&
+                          (g_main_state_flags & (MSF_ROOM_TRANSITION | MSF_MENU_ACTIVE |
+                                                 MSF_SCREEN_STANDALONE)) == 0;
+            if (g_bInterpolate60) {
+                s_interpTick++;
+                s_interpPrev.swap(s_interpCur);
+                s_interpCur.clear();
+                int stage = g_stageId, room = g_roomId, cam = g_roomCameraId;
+                s_interpSceneOk = (stage == s_interpStage && room == s_interpRoom &&
+                                   cam == s_interpCam);
+                s_interpStage = stage; s_interpRoom = room; s_interpCam = cam;
+            }
 
-            // Render high-depth pending sprites (background, room lighting).
-            // At/above this threshold are scene elements that must sit behind
-            // the 3D pass: the room BG (0xFFF), the death screen's black rect
-            // (0xFC00), the menu's window fills (2100). Below it are overlays,
-            // which are ordered against the command sprites further down.
-            //
-            // 0x800 was used here once: it moved the menu's black masking
-            // rects (980) into the on-top bucket, where they covered the
-            // frame, item icons and character portrait - only the text (also
-            // an overlay, drawn after them) stayed visible. That is what the
-            // interleaved pass below fixes properly: at 980 the masks cover
-            // the sliding file book and map pages (1060-1140) while the frame
-            // parts (820-964) and everything nearer still draw on top.
-            for (int i = 0; i < g_pendingSpriteCount; i++) {
-                if (g_pendingSprites[i].valid && g_pendingSprites[i].depth >= PENDING_SCENE_DEPTH) {
-                    MarniDrawSprite(
-                        g_pendingSprites[i].x, g_pendingSprites[i].y,
-                        g_pendingSprites[i].w, g_pendingSprites[i].h,
-                        g_pendingSprites[i].u0, g_pendingSprites[i].v0,
-                        g_pendingSprites[i].u1, g_pendingSprites[i].v1,
-                        g_pendingSprites[i].color,
-                        g_pendingSprites[i].tex);
+            if (interp) {
+                // In-between frame first, presented at the start of the tick.
+                s_interpBlendPass = true;
+                g_tmdKeepQueue = true;
+                DrawQueuedScene();
+                g_tmdKeepQueue = false;
+                s_interpBlendPass = false;
+                MarniPresent();
+                g_numFramesPresented++;
+
+                // Then the real frame half a tick (16 ms) later.
+                DWORD half = g_dwGameTimer1 + 16;
+                for (;;) {
+                    DWORD now = plat_time_ms();
+                    if ((int)(now - half) >= 0 || (int)(now - g_dwGameTimer1) < 0) break;
+#ifdef _WIN32
+                    Sleep(1);
+#endif
                 }
+                MarniClear();
             }
 
-            // Collision boundary overlay ([Debug] ShowCollision, F8) - drawn
-            // only while debug features are enabled (the flag is set from
-            // config.ini / the F8 toggle under the same gate, and the draw
-            // itself early-returns on it). Between the background and the 3D
-            // so characters occlude the outlines and it reads as geometry
-            // lying on the floor.
-            CollisionDebug_Draw();
-
-            // Render queued 3D TMD objects (entities, options-menu character)
-            FlushTmdObjects();
-
-            // Render command buffer sprites (game objects, title text, etc.).
-            // The >= 0x10000 half already drew before the TMD pass.
-            //
-            // An overlay whose depth falls INSIDE the command-sprite range has
-            // to be interleaved, not deferred to the pass below. Two cases:
-            //   * the file reader's fullscreen black (548) must cover the
-            //     pause-menu frame (command sprites at 1060-1140) while the
-            //     document page, its page arrows and the EXIT label (500-516)
-            //     draw on top of it;
-            //   * the pause menu's four black masking rects (980) must cover
-            //     the sliding file book / map pages (1060-1140) - otherwise
-            //     those show through the gaps between the frame panels - while
-            //     the frame parts (820-964), item icons, portrait and text all
-            //     stay above them.
-            // The pending list is already sorted far-to-near, so walking it and
-            // flushing the sprites behind each overlay reproduces the
-            // original's single ordering table.
-            //
-            // 500 is the floor because a command sprite's depthSort is
-            // depth*16 + 500: nothing from display_texture/draw_texture can
-            // land below it, so overlays under 500 (every screen fade, at
-            // 450-499) keep drawing after ALL of them exactly as before.
-            // Effect sprites used to be the one class that could sort lower;
-            // they are SPRITE_CLASS_EFFECT now and drew during the TMD pass, so
-            // this range sees nothing below 500 at all.
-            unsigned int spriteCursor = 0x10000;
-            for (int i = 0; i < g_pendingSpriteCount; i++) {
-                if (!g_pendingSprites[i].valid) continue;
-                unsigned int d = g_pendingSprites[i].depth;
-                if (d >= PENDING_SCENE_DEPTH || d < 500) continue;
-                FlushSpriteCommandsRange(d, spriteCursor);
-                spriteCursor = d;
-                MarniDrawSprite(
-                    g_pendingSprites[i].x, g_pendingSprites[i].y,
-                    g_pendingSprites[i].w, g_pendingSprites[i].h,
-                    g_pendingSprites[i].u0, g_pendingSprites[i].v0,
-                    g_pendingSprites[i].u1, g_pendingSprites[i].v1,
-                    g_pendingSprites[i].color,
-                    g_pendingSprites[i].tex);
-            }
-            FlushSpriteCommandsRange(0, spriteCursor);
-            // Both range flushes above drew; clear the queue now (the original
-            // reset it inside the single flush). Without this the command
-            // buffer accumulates across frames and display_texture returns 0
-            // on overflow - every 2D effect stops rendering.
+            DrawQueuedScene();
             g_SpriteQueueCount = 0;
-
-            // Render the remaining low-depth pending sprites last (the screen
-            // fade overlays and colour tinting under depth 500; the
-            // 500-PENDING_SCENE_DEPTH band already drew, interleaved, above).
-            for (int i = 0; i < g_pendingSpriteCount; i++) {
-                if (g_pendingSprites[i].valid && g_pendingSprites[i].depth < 500) {
-                    MarniDrawSprite(
-                        g_pendingSprites[i].x, g_pendingSprites[i].y,
-                        g_pendingSprites[i].w, g_pendingSprites[i].h,
-                        g_pendingSprites[i].u0, g_pendingSprites[i].v0,
-                        g_pendingSprites[i].u1, g_pendingSprites[i].v1,
-                        g_pendingSprites[i].color,
-                        g_pendingSprites[i].tex);
-                }
-            }
 
             if (!g_DisablePad) {
                 MarniPresent();
@@ -578,12 +783,15 @@ void OT_InsertPrimitive(void* prim, unsigned int depth)
     if (p[0] != 1) return;
 
     if (g_displayImageSRV == MARNI_NULL_HANDLE) return;
+    // Mod: the Battle Game's ending circles the player against black.
+    if (g_battleEndingCam != 0) return;
     // Menu-mode bit hides the room bg quad (the real menus draw their own
     // graphics). The F1 debug menu keeps the frozen game visible underneath,
     // so don't drop the bg while it is open - its flag editor can set this
     // very bit (g_main_state_flags is flag bank 5), which blacked the screen.
     // g_debugMenuOpen stays 0 while debug features are disabled.
-    if ((g_main_state_flags & MSF_SCREEN_STANDALONE) != 0 && g_debugMenuOpen == 0) {
+    if ((g_main_state_flags & MSF_SCREEN_STANDALONE) != 0 && g_debugMenuOpen == 0 &&
+        g_videoMenuOpen == 0) {
         return;
     }
     if (g_pendingSpriteCount >= MAX_PENDING_SPRITES) return;

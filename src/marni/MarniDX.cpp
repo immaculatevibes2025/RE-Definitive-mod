@@ -24,6 +24,9 @@
 // config.ini [Display] VSync (Globals.cpp). Declared locally rather than
 // pulling all of Globals.h into the Marni layer.
 extern BOOL g_bVSync;
+// CrashLog.cpp: one "[step]" line in crash.log next to the exe.
+extern void crashlog_mark(const char* step);
+static int s_postTrace = 0;     // log the first few post-pass frames after a rebuild
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -90,6 +93,133 @@ float4 main(PS_INPUT i) : SV_Target { return g_Texture.Sample(g_Sampler, i.tex) 
 )";
 
 // ============================================================================
+// Port-added post-processing (Video Options: ANTI-ALIASING / CRT SHADER).
+// With either on, the game draws into an offscreen scene target (multisampled
+// for MSAA) and Present() puts it on the back buffer through one full-screen
+// pass: a straight copy, or the CRT shader below.
+// ============================================================================
+static const char* g_PostVS_Source = R"(
+float4 main(uint id : SV_VertexID) : SV_Position
+{
+    float2 p = float2((id << 1) & 2, id & 2);
+    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+)";
+
+static const char* g_CopyPS_Source = R"(
+Texture2D g_Scene : register(t0);
+float4 main(float4 pos : SV_Position) : SV_Target
+{
+    return float4(g_Scene.Load(int3(int2(pos.xy), 0)).rgb, 1.0);
+}
+)";
+
+// CRT shader in the style of CRT-Royale (TroggleMonkey, libretro). A
+// single-pass re-implementation of its main ideas, not the multi-pass
+// original: linear-light gaussian scanline beams whose width grows with
+// brightness, a horizontal beam blur, an aperture-grille phosphor mask at
+// the output resolution with brightness compensation, halation, gentle
+// curvature with rounded corners, and a vignette. The scanlines follow the
+// game's own 240 lines inside the content rectangle.
+static const char* g_CrtPS_Source = R"(
+Texture2D    g_Scene   : register(t0);
+SamplerState g_Linear  : register(s0);
+cbuffer CrtCB : register(b0)
+{
+    float4 g_Rect;     // content rectangle in back-buffer pixels: x, y, w, h
+    float4 g_Size;     // back buffer w, h, 1/w, 1/h
+    float4 g_Src;      // source lines: 320, 240 (fewer when 16:9 crops), 0, 0
+};
+
+#define SRC (g_Src.xy)
+static const float  GAMMA_IN     = 2.4;
+static const float  GAMMA_OUT    = 2.2;
+static const float  SIGMA_MIN    = 0.20;   // beam half-width at black (in lines)
+static const float  SIGMA_MAX    = 0.42;   // beam half-width at full white
+static const float  MASK_DIM     = 0.40;   // aperture grille: off-phosphor level
+static const float  MASK_BOOST   = 1.55;   // brightness given back after the mask
+static const float  HALATION     = 0.08;
+static const float2 CURVATURE    = float2(0.030, 0.042);
+static const float  CORNER       = 0.012;
+
+float3 ToLinear(float3 c) { return pow(max(c, 0.0), GAMMA_IN); }
+
+float2 Curve(float2 uv)
+{
+    float2 c = uv * 2.0 - 1.0;
+    c *= 1.0 + c.yx * c.yx * CURVATURE;
+    return c * 0.5 + 0.5;
+}
+
+// One source line, sampled at x with a 3-tap horizontal beam blur.
+float3 Line(float row, float x)
+{
+    row = clamp(row, 0.0, SRC.y - 1.0);
+    float  v  = (row + 0.5) / SRC.y;
+    float  dx = 0.55 / SRC.x;
+    float2 a  = (g_Rect.xy + float2(x - dx, v) * g_Rect.zw) * g_Size.zw;
+    float2 b  = (g_Rect.xy + float2(x,      v) * g_Rect.zw) * g_Size.zw;
+    float2 c  = (g_Rect.xy + float2(x + dx, v) * g_Rect.zw) * g_Size.zw;
+    return ToLinear(g_Scene.SampleLevel(g_Linear, a, 0).rgb) * 0.25 +
+           ToLinear(g_Scene.SampleLevel(g_Linear, b, 0).rgb) * 0.50 +
+           ToLinear(g_Scene.SampleLevel(g_Linear, c, 0).rgb) * 0.25;
+}
+
+// Gaussian beam profile, per channel, wider for brighter colour.
+float3 Beam(float dist, float3 col)
+{
+    float3 sigma = lerp(SIGMA_MIN, SIGMA_MAX, sqrt(saturate(col)));
+    float3 d = dist / sigma;
+    return exp(-0.5 * d * d) * (0.40 / sigma);
+}
+
+float4 main(float4 pos : SV_Position) : SV_Target
+{
+    float2 uv = (pos.xy - g_Rect.xy) / g_Rect.zw;
+    if (any(uv < 0.0) || any(uv > 1.0)) return float4(0, 0, 0, 1);
+
+    uv = Curve(uv);
+    float2 edge = min(uv, 1.0 - uv);
+    if (any(edge < 0.0)) return float4(0, 0, 0, 1);
+    float corner = saturate(min(edge.x, edge.y) / CORNER);
+
+    float y   = uv.y * SRC.y - 0.5;
+    float row = floor(y);
+    float f   = y - row;
+
+    float3 c0 = Line(row,       uv.x);
+    float3 c1 = Line(row + 1.0, uv.x);
+    float3 col = c0 * Beam(f, c0) + c1 * Beam(1.0 - f, c1);
+
+    // Halation: light spreading in the glass, from a wide cross of taps.
+    float3 glow = 0.0;
+    [unroll] for (int i = -2; i <= 2; i++) {
+        glow += Line(row + i * 2.0, uv.x);
+        glow += Line(row, uv.x + i * 3.0 / SRC.x);
+    }
+    col = lerp(col, glow / 10.0, HALATION);
+
+    // Aperture grille: R, G, B stripes one output pixel wide.
+    int    m    = (int)pos.x % 3;
+    float3 mask = MASK_DIM;
+    if (m == 0) mask.r = 1.0; else if (m == 1) mask.g = 1.0; else mask.b = 1.0;
+    col *= mask * MASK_BOOST;
+
+    // Vignette and the rounded corners.
+    float2 vc = uv * (1.0 - uv.yx);
+    col *= pow(saturate(vc.x * vc.y * 15.0), 0.18) * corner;
+
+    return float4(pow(saturate(col), 1.0 / GAMMA_OUT), 1.0);
+}
+)";
+
+struct CrtConstantBuffer {
+    float rect[4];
+    float size[4];
+    float src[4];      // mod: source resolution the scanlines follow
+};
+
+// ============================================================================
 // Internal types (file-local, never exported)
 // ============================================================================
 struct QuadVertex {
@@ -137,6 +267,34 @@ struct MarniDX::Impl {
     ID3D11Texture2D*         depthStencil    = nullptr;
     ID3D11DepthStencilView*   depthStencilView = nullptr;
 
+    // Port-added: the target the game is drawing into this frame - the back
+    // buffer above, or the offscreen scene below. Non-owning aliases.
+    ID3D11RenderTargetView*  curRtv        = nullptr;
+    ID3D11DepthStencilView*  curDsv        = nullptr;
+
+    // Port-added offscreen scene (MSAA and/or CRT shader). Back-buffer sized.
+    int                      msaa          = 1;     // requested 1/2/4/8
+    int                      msaaActive    = 1;     // what the device allowed
+    BOOL                     crtShader     = FALSE;
+    ID3D11Texture2D*         sceneTex      = nullptr;   // msaaActive samples
+    ID3D11RenderTargetView*  sceneRtv      = nullptr;
+    ID3D11ShaderResourceView* sceneSrv     = nullptr;   // only when msaaActive == 1
+    ID3D11Texture2D*         sceneDepth    = nullptr;
+    ID3D11DepthStencilView*  sceneDsv      = nullptr;
+    ID3D11Texture2D*         resolveTex    = nullptr;   // only when msaaActive > 1
+    ID3D11ShaderResourceView* resolveSrv   = nullptr;
+    ID3D11VertexShader*      postVS        = nullptr;
+    ID3D11PixelShader*       copyPS        = nullptr;
+    ID3D11PixelShader*       crtPS         = nullptr;
+    ID3D11Buffer*            crtCB         = nullptr;
+    ID3D11RasterizerState*   rasterNoScissor = nullptr;
+
+    BOOL UsesScene() const { return msaa > 1 || crtShader; }
+
+    // Set by SetMsaa / SetCrtShader; the scene is rebuilt at the end of the
+    // next Present(). See SetMsaa for why it is never rebuilt on the spot.
+    BOOL                     sceneDirty    = FALSE;
+
     // pipeline state
     ID3D11RasterizerState*   rasterScissor = nullptr;
     ID3D11BlendState*        blendAlpha    = nullptr;
@@ -168,10 +326,74 @@ struct MarniDX::Impl {
     ID3D11Texture2D*         whiteTex      = nullptr;
     ID3D11ShaderResourceView* whiteSRV    = nullptr;
 
-    // back buffer dimensions (clamped to >= 320x240)
+    // Drawing dimensions: the content rectangle every projection maps over
+    // (= the back buffer in MARNI_ASPECT_STRETCH). Port-added split: bbW/bbH
+    // are the real swap-chain size, cx/cy the content rectangle's origin.
     DWORD                    width         = 0;
     DWORD                    height        = 0;
+    DWORD                    bbW           = 0;
+    DWORD                    bbH           = 0;
+    LONG                     cx            = 0;
+    LONG                     cy            = 0;
+    int                      aspectMode    = MARNI_ASPECT_STRETCH;
+    int                      vpMode        = MARNI_VP_CONTENT;   // mod: 16:9 pan-and-scan
+    float                    vpPan         = 0.0f;
+    BOOL                     wideFrame     = FALSE;  // this frame drew a 16:9 scene (CRT rect)
+
+    // The centred 16:9 box (held to 16:9 on wider buffers) and the 4:3
+    // scene's height when scaled to its width.
+    void WideBox(LONG* offX, LONG* effW, float* sceneH) const
+    {
+        LONG w = (LONG)bbW;
+        LONG maxW = (LONG)(((long long)bbH * 16 + 8) / 9);
+        if (w > maxW) w = maxW;
+        *effW = w;
+        *offX = ((LONG)bbW - w) / 2;
+        *sceneH = (float)w * 0.75f;
+    }
     BOOL                     ready         = FALSE;
+
+    // Recompute the content rectangle from bbW/bbH and aspectMode.
+    void UpdateContentRect()
+    {
+        int x = 0, y = 0, w = (int)bbW, h = (int)bbH;
+        MarniComputeContentRect(aspectMode, (int)bbW, (int)bbH, &x, &y, &w, &h);
+        cx = x; cy = y;
+        width = (DWORD)w; height = (DWORD)h;
+    }
+
+    // Point the rasteriser at the content rectangle. The scissor matches it,
+    // so nothing spills into the bars; Clear() still clears the whole target.
+    void ApplyViewport()
+    {
+        if (!context) return;
+        D3D11_VIEWPORT vp = {};
+        vp.TopLeftX = (float)cx;
+        vp.TopLeftY = (float)cy;
+        vp.Width    = (float)width;
+        vp.Height   = (float)height;
+        vp.MaxDepth = 1.0f;
+        D3D11_RECT sr = { cx, cy, cx + (LONG)width, cy + (LONG)height };
+        // Mod: 16:9 pan-and-scan. Only when the buffer is wider than 4:3.
+        // Wider than 16:9 (21:9) is held to a centred 16:9 box.
+        LONG effW, offX; float sceneH;
+        WideBox(&offX, &effW, &sceneH);
+        if (aspectMode == MARNI_ASPECT_WIDE && vpMode != MARNI_VP_CONTENT &&
+            sceneH > (float)bbH + 0.5f) {
+            sr.left = offX; sr.top = 0; sr.right = offX + effW; sr.bottom = (LONG)bbH;
+            vp.TopLeftX = (float)offX;
+            vp.Width    = (float)effW;
+            if (vpMode == MARNI_VP_SCENE) {
+                vp.TopLeftY = -vpPan * sceneH / 240.0f;
+                vp.Height   = sceneH;
+            } else {
+                vp.TopLeftY = 0.0f;
+                vp.Height   = (float)bbH;
+            }
+        }
+        context->RSSetViewports(1, &vp);
+        context->RSSetScissorRects(1, &sr);
+    }
 
     // texture handle table (index 0 reserved = NULL)
     TexSlot                  slots[MARNI_MAX_TEXTURES];
@@ -187,6 +409,12 @@ struct MarniDX::Impl {
                    int w, int h);
     void ReleaseAllState();
     void ReleaseAllTextures();
+
+    // Port-added offscreen scene management.
+    void ReleaseScene();
+    void CreateScene();          // (re)build for bbW x bbH, msaa, crtShader
+    void BindCurrent();          // OMSetRenderTargets on the current target
+    ID3D11Texture2D* ResolvedScene();   // single-sample copy of the scene, or null
 };
 
 // ----------------------------------------------------------------------------
@@ -432,12 +660,185 @@ void MarniDX::Impl::ReleaseAllState()
     if (depthEnabled)  { depthEnabled->Release();  depthEnabled  = nullptr; }
     if (depthDisabled) { depthDisabled->Release(); depthDisabled = nullptr; }
     if (depthTestNoWrite) { depthTestNoWrite->Release(); depthTestNoWrite = nullptr; }
+    ReleaseScene();
+    if (postVS)          { postVS->Release();          postVS          = nullptr; }
+    if (copyPS)          { copyPS->Release();          copyPS          = nullptr; }
+    if (crtPS)           { crtPS->Release();           crtPS           = nullptr; }
+    if (crtCB)           { crtCB->Release();           crtCB           = nullptr; }
+    if (rasterNoScissor) { rasterNoScissor->Release(); rasterNoScissor = nullptr; }
+    curRtv = nullptr; curDsv = nullptr;
     if (depthStencilView){ depthStencilView->Release(); depthStencilView = nullptr; }
     if (depthStencil)    { depthStencil->Release();     depthStencil     = nullptr; }
     if (rtv)            { rtv->Release();              rtv              = nullptr; }
     if (context)        { context->Release();          context          = nullptr; }
     if (swapChain)      { swapChain->Release();        swapChain        = nullptr; }
     if (device)         { device->Release();           device           = nullptr; }
+}
+
+// ============================================================================
+// Port-added offscreen scene (MSAA / CRT shader)
+// ============================================================================
+static bool CompileBlob(const char* src, const char* name, const char* target,
+                        ID3DBlob** out)
+{
+    ID3DBlob* err = nullptr;
+    HRESULT hr = D3DCompile(src, strlen(src), name, nullptr, nullptr, "main",
+                            target, D3DCOMPILE_ENABLE_STRICTNESS, 0, out, &err);
+    if (FAILED(hr)) {
+        OutputDebugStringA("[MarniDX] ");
+        OutputDebugStringA(name);
+        OutputDebugStringA(" compile failed: ");
+        if (err) OutputDebugStringA((char*)err->GetBufferPointer());
+        OutputDebugStringA("\n");
+    }
+    if (err) err->Release();
+    return SUCCEEDED(hr);
+}
+
+// The post shaders are optional: if any of them fails, MSAA and the CRT
+// shader simply stay unavailable and the game draws straight to the back
+// buffer as before.
+static void CompilePostShaders(MarniDX::Impl* p)
+{
+    ID3DBlob* b = nullptr;
+    if (CompileBlob(g_PostVS_Source, "PostVS", "vs_4_0", &b)) {
+        p->device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &p->postVS);
+        b->Release();
+    }
+    if (CompileBlob(g_CopyPS_Source, "CopyPS", "ps_4_0", &b)) {
+        p->device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &p->copyPS);
+        b->Release();
+    }
+    if (CompileBlob(g_CrtPS_Source, "CrtPS", "ps_4_0", &b)) {
+        p->device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &p->crtPS);
+        b->Release();
+    }
+    D3D11_BUFFER_DESC cb = {};
+    cb.Usage          = D3D11_USAGE_DYNAMIC;
+    cb.ByteWidth      = sizeof(CrtConstantBuffer);
+    cb.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    p->device->CreateBuffer(&cb, nullptr, &p->crtCB);
+
+    D3D11_RASTERIZER_DESC rs = {};
+    rs.FillMode        = D3D11_FILL_SOLID;
+    rs.CullMode        = D3D11_CULL_NONE;
+    rs.DepthClipEnable = TRUE;
+    p->device->CreateRasterizerState(&rs, &p->rasterNoScissor);
+}
+
+void MarniDX::Impl::ReleaseScene()
+{
+    if (context) {
+        ID3D11ShaderResourceView* none = nullptr;
+        context->PSSetShaderResources(0, 1, &none);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+    if (resolveSrv) { resolveSrv->Release(); resolveSrv = nullptr; }
+    if (resolveTex) { resolveTex->Release(); resolveTex = nullptr; }
+    if (sceneDsv)   { sceneDsv->Release();   sceneDsv   = nullptr; }
+    if (sceneDepth) { sceneDepth->Release(); sceneDepth = nullptr; }
+    if (sceneSrv)   { sceneSrv->Release();   sceneSrv   = nullptr; }
+    if (sceneRtv)   { sceneRtv->Release();   sceneRtv   = nullptr; }
+    if (sceneTex)   { sceneTex->Release();   sceneTex   = nullptr; }
+    msaaActive = 1;
+    curRtv = rtv;
+    curDsv = depthStencilView;
+}
+
+void MarniDX::Impl::CreateScene()
+{
+    {
+        char m[128];
+        sprintf(m, "video: scene rebuild %ux%u msaa=%d crt=%d post=%d%d%d%d",
+                (unsigned)bbW, (unsigned)bbH, msaa, (int)crtShader,
+                postVS != nullptr, copyPS != nullptr, crtPS != nullptr, rasterNoScissor != nullptr);
+        crashlog_mark(m);
+    }
+    ReleaseScene();
+    if (!device || !UsesScene() || bbW == 0 || bbH == 0 ||
+        !postVS || !copyPS || !rasterNoScissor) {
+        BindCurrent();
+        return;
+    }
+
+    // The highest sample count the device supports, up to the one asked for.
+    int samples = msaa < 1 ? 1 : msaa;
+    while (samples > 1) {
+        UINT q = 0;
+        if (SUCCEEDED(device->CheckMultisampleQualityLevels(
+                DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)samples, &q)) && q > 0) {
+            UINT qd = 0;
+            if (SUCCEEDED(device->CheckMultisampleQualityLevels(
+                    DXGI_FORMAT_D24_UNORM_S8_UINT, (UINT)samples, &qd)) && qd > 0)
+                break;
+        }
+        samples /= 2;
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = bbW; td.Height = bbH; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = (UINT)samples;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | (samples == 1 ? D3D11_BIND_SHADER_RESOURCE : 0);
+    bool ok = SUCCEEDED(device->CreateTexture2D(&td, nullptr, &sceneTex)) &&
+              SUCCEEDED(device->CreateRenderTargetView(sceneTex, nullptr, &sceneRtv));
+    if (ok && samples == 1) {
+        ok = SUCCEEDED(device->CreateShaderResourceView(sceneTex, nullptr, &sceneSrv));
+    }
+    if (ok && samples > 1) {
+        D3D11_TEXTURE2D_DESC rd = td;
+        rd.SampleDesc.Count = 1;
+        rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ok = SUCCEEDED(device->CreateTexture2D(&rd, nullptr, &resolveTex)) &&
+             SUCCEEDED(device->CreateShaderResourceView(resolveTex, nullptr, &resolveSrv));
+    }
+    if (ok) {
+        D3D11_TEXTURE2D_DESC dd = td;
+        dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ok = SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &sceneDepth)) &&
+             SUCCEEDED(device->CreateDepthStencilView(sceneDepth, nullptr, &sceneDsv));
+    }
+    if (!ok) {
+        OutputDebugStringA("[MarniDX] offscreen scene creation failed - drawing to the back buffer\n");
+        crashlog_mark("video: scene creation FAILED - drawing to the back buffer");
+        ReleaseScene();
+        BindCurrent();
+        return;
+    }
+    msaaActive = samples;
+    curRtv = sceneRtv;
+    curDsv = sceneDsv;
+    const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    context->ClearRenderTargetView(sceneRtv, black);
+    context->ClearDepthStencilView(sceneDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    BindCurrent();
+    char msg[96];
+    sprintf(msg, "[MarniDX] scene %ux%u, MSAA %dx, CRT %s\n",
+            (unsigned)bbW, (unsigned)bbH, samples, crtShader ? "on" : "off");
+    OutputDebugStringA(msg);
+    crashlog_mark(msg);
+    s_postTrace = 3;
+}
+
+void MarniDX::Impl::BindCurrent()
+{
+    if (!context) return;
+    if (curRtv) context->OMSetRenderTargets(1, &curRtv, curDsv);
+    ApplyViewport();
+    if (rasterScissor) context->RSSetState(rasterScissor);
+}
+
+ID3D11Texture2D* MarniDX::Impl::ResolvedScene()
+{
+    if (!sceneTex) return nullptr;
+    if (msaaActive > 1) {
+        context->ResolveSubresource(resolveTex, 0, sceneTex, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+        return resolveTex;
+    }
+    return sceneTex;
 }
 
 // ============================================================================
@@ -511,8 +912,9 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
     }
     OutputDebugStringA("[MarniDX] D3D11 device created OK\n");
     p->hWnd   = hWnd;
-    p->width  = (DWORD)width;
-    p->height = (DWORD)height;
+    p->bbW    = (DWORD)width;
+    p->bbH    = (DWORD)height;
+    p->UpdateContentRect();
 
     // back buffer -> RTV
     ID3D11Texture2D* bb = nullptr;
@@ -674,14 +1076,12 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
         p->device->CreateShaderResourceView(p->whiteTex, &wsd, &p->whiteSRV);
     }
 
-    // bind RTV + set viewport/scissor
-    p->context->OMSetRenderTargets(1, &p->rtv, p->depthStencilView);
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)p->width; vp.Height = (float)p->height; vp.MaxDepth = 1.0f;
-    p->context->RSSetViewports(1, &vp);
-    D3D11_RECT sr = { 0, 0, (LONG)p->width, (LONG)p->height };
-    p->context->RSSetScissorRects(1, &sr);
-    p->context->RSSetState(p->rasterScissor);
+    // Port-added: MSAA / CRT post-processing (optional - see CompilePostShaders).
+    CompilePostShaders(p);
+
+    // bind RTV + set viewport/scissor (the offscreen scene when MSAA or the
+    // CRT shader is on, otherwise the back buffer)
+    p->CreateScene();
 
     p->ready = TRUE;
 
@@ -697,7 +1097,7 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
             int monW = mi.rcMonitor.right - mi.rcMonitor.left;
             int monH = mi.rcMonitor.bottom - mi.rcMonitor.top;
             if (monW >= 320 && monH >= 240 &&
-                (monW != (int)p->width || monH != (int)p->height)) {
+                (monW != (int)p->bbW || monH != (int)p->bbH)) {
                 ChangeDisplayMode((DWORD)monW, (DWORD)monH, FALSE);
             }
         }
@@ -740,7 +1140,9 @@ int MarniDX::ChangeDisplayMode(DWORD newW, DWORD newH, BOOL fullScreen)
     if (newW < 320) newW = 320;
     if (newH < 240) newH = 240;
 
+    p->ReleaseScene();
     p->context->OMSetRenderTargets(0, nullptr, nullptr);
+    p->curRtv = nullptr; p->curDsv = nullptr;
     if (p->rtv) { p->rtv->Release(); p->rtv = nullptr; }
     // The depth surface has to be resized with the render target: D3D11 rejects
     // a depth view whose dimensions differ from the colour view, which would
@@ -752,7 +1154,8 @@ int MarniDX::ChangeDisplayMode(DWORD newW, DWORD newH, BOOL fullScreen)
         DXGI_FORMAT_R8G8B8A8_UNORM, 0);
     if (FAILED(hr)) return 0;
 
-    p->width = newW; p->height = newH;
+    p->bbW = newW; p->bbH = newH;
+    p->UpdateContentRect();
     ID3D11Texture2D* bb = nullptr;
     hr = p->swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
     if (SUCCEEDED(hr)) {
@@ -771,13 +1174,52 @@ int MarniDX::ChangeDisplayMode(DWORD newW, DWORD newH, BOOL fullScreen)
         p->device->CreateDepthStencilView(p->depthStencil, nullptr,
                                           &p->depthStencilView);
 
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)newW; vp.Height = (float)newH; vp.MaxDepth = 1.0f;
-    p->context->RSSetViewports(1, &vp);
-    D3D11_RECT sr = { 0, 0, (LONG)newW, (LONG)newH };
-    p->context->RSSetScissorRects(1, &sr);
-    p->context->OMSetRenderTargets(1, &p->rtv, p->depthStencilView);
+    p->curRtv = p->rtv;
+    p->curDsv = p->depthStencilView;
+    p->CreateScene();       // rebuilds the scene at the new size and binds
     return 1;
+}
+
+void MarniDX::SetAspectMode(int mode)
+{
+    Impl* p = m_pImpl;
+    if (!p) return;
+    if (mode < 0 || mode >= MARNI_ASPECT_COUNT) mode = MARNI_ASPECT_STRETCH;
+    p->aspectMode = mode;
+    if (p->bbW == 0 || p->bbH == 0) return;   // before Create: applied there
+    p->UpdateContentRect();
+    p->ApplyViewport();
+}
+
+void MarniDX::SetViewportMode(int mode, float panLines)
+{
+    Impl* p = m_pImpl;
+    if (!p || !p->ready) return;
+    if (p->vpMode == mode && p->vpPan == panLines) return;
+    p->vpMode = mode;
+    p->vpPan  = panLines;
+    if (mode != MARNI_VP_CONTENT && p->aspectMode == MARNI_ASPECT_WIDE) {
+        LONG ox, ew; float sh;
+        p->WideBox(&ox, &ew, &sh);
+        if (sh > (float)p->bbH + 0.5f) p->wideFrame = TRUE;
+    }
+    p->ApplyViewport();
+}
+
+float MarniDX::WideVisibleLines() const
+{
+    Impl* p = m_pImpl;
+    if (!p || p->bbW == 0) return 240.0f;
+    float effW = (float)p->bbW;
+    const float maxW = (float)p->bbH * 16.0f / 9.0f;
+    if (effW > maxW) effW = maxW;
+    float v = 240.0f * (float)p->bbH / (effW * 0.75f);
+    return v > 240.0f ? 240.0f : v;
+}
+
+int MarniDX::GetAspectMode() const
+{
+    return m_pImpl ? m_pImpl->aspectMode : MARNI_ASPECT_STRETCH;
 }
 
 int MarniDX::HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -911,11 +1353,11 @@ void MarniDX::EnumerateAdapters(D3DRendererInfo* out, int max, int* outCount)
 void MarniDX::Clear(float r, float g, float b, float a)
 {
     Impl* p = m_pImpl;
-    if (!p || !p->context || !p->rtv) return;
+    if (!p || !p->context || !p->curRtv) return;
     float c[4] = { r, g, b, a };
-    p->context->ClearRenderTargetView(p->rtv, c);
-    if (p->depthStencilView)
-        p->context->ClearDepthStencilView(p->depthStencilView,
+    p->context->ClearRenderTargetView(p->curRtv, c);
+    if (p->curDsv)
+        p->context->ClearDepthStencilView(p->curDsv,
             D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 }
 
@@ -936,10 +1378,117 @@ void MarniDX::Present()
     // and pacing resumes. Measured: 31.6 ms per tick instead of 33, i.e. ~4%
     // fast, oscillating. The original blitted to the window without waiting for
     // a vblank, so its limiter always won.
-    p->swapChain->Present(g_bVSync ? 1 : 0, 0);
-    if (p->rtv)
-        p->context->OMSetRenderTargets(1, &p->rtv, p->depthStencilView);
+    //
+    // VSync is now also a Video Options setting; that note is why it stays
+    // off by default.
+
+    // Port-added: put the offscreen scene on the back buffer - a straight
+    // copy, or through the CRT shader.
+    if (p->sceneTex && p->rtv) {
+        if (s_postTrace > 0) crashlog_mark("video: post resolve");
+        ID3D11Texture2D* src = p->ResolvedScene();
+        ID3D11ShaderResourceView* srv = (src == p->resolveTex) ? p->resolveSrv : p->sceneSrv;
+        const bool crt = p->crtShader && p->crtPS && p->crtCB;
+
+        p->context->OMSetRenderTargets(1, &p->rtv, nullptr);
+        D3D11_VIEWPORT vp = {};
+        vp.Width = (float)p->bbW; vp.Height = (float)p->bbH; vp.MaxDepth = 1.0f;
+        p->context->RSSetViewports(1, &vp);
+        p->context->RSSetState(p->rasterNoScissor);
+        p->context->IASetInputLayout(nullptr);
+        p->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        p->context->VSSetShader(p->postVS, nullptr, 0);
+        p->context->PSSetShader(crt ? p->crtPS : p->copyPS, nullptr, 0);
+        p->context->PSSetShaderResources(0, 1, &srv);
+        p->context->PSSetSamplers(0, 1, &p->sampLinear);
+        float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        p->context->OMSetBlendState(p->blendDisabled, bf, 0xFFFFFFFFu);
+        p->context->OMSetDepthStencilState(p->depthDisabled, 0);
+        if (crt) {
+            CrtConstantBuffer cb;
+            cb.rect[0] = (float)p->cx;    cb.rect[1] = (float)p->cy;
+            cb.rect[2] = (float)p->width; cb.rect[3] = (float)p->height;
+            cb.src[0] = 320.0f; cb.src[1] = 240.0f; cb.src[2] = 0.0f; cb.src[3] = 0.0f;
+            if (p->wideFrame) {
+                // Mod: 16:9 pan-and-scan frame - the CRT covers the 16:9 box,
+                // and its scanlines follow the visible part of the 240 lines.
+                LONG ox, ew; float sh;
+                p->WideBox(&ox, &ew, &sh);
+                cb.rect[0] = (float)ox; cb.rect[1] = 0.0f;
+                cb.rect[2] = (float)ew; cb.rect[3] = (float)p->bbH;
+                cb.src[1] = 240.0f * (float)p->bbH / sh;
+            }
+            cb.size[0] = (float)p->bbW;   cb.size[1] = (float)p->bbH;
+            cb.size[2] = 1.0f / (float)p->bbW; cb.size[3] = 1.0f / (float)p->bbH;
+            D3D11_MAPPED_SUBRESOURCE m = {};
+            if (SUCCEEDED(p->context->Map(p->crtCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+                memcpy(m.pData, &cb, sizeof(cb));
+                p->context->Unmap(p->crtCB, 0);
+            }
+            p->context->PSSetConstantBuffers(0, 1, &p->crtCB);
+        }
+        if (s_postTrace > 0) crashlog_mark(crt ? "video: post draw (crt)" : "video: post draw (copy)");
+        p->context->Draw(3, 0);
+
+        ID3D11ShaderResourceView* none = nullptr;
+        p->context->PSSetShaderResources(0, 1, &none);
+    }
+
+    HRESULT phr = p->swapChain->Present(g_bVSync ? 1 : 0, 0);
+    if (p->sceneDirty) {
+        // A Video Options change: rebuild here, on the main thread's own
+        // stack (see SetMsaa). CreateScene binds the new target itself.
+        p->sceneDirty = FALSE;
+        p->CreateScene();
+    }
+    if (s_postTrace > 0) {
+        crashlog_mark("video: post present done");
+        s_postTrace--;
+    }
+    static int s_presentErrLogged = 0;
+    if (FAILED(phr) && !s_presentErrLogged) {
+        s_presentErrLogged = 1;
+        char m[128];
+        sprintf(m, "video: Present failed hr=0x%08lX removed-reason=0x%08lX",
+                (unsigned long)phr,
+                (unsigned long)(p->device ? p->device->GetDeviceRemovedReason() : 0));
+        crashlog_mark(m);
+    }
+    p->wideFrame = FALSE;
+    p->BindCurrent();
 }
+
+// Port-added (Video Options). Record the setting; the scene target is rebuilt
+// at the end of the next Present().
+//
+// Never rebuild it here. The F2 menu applies its settings from inside
+// game_loop, which runs as a TaskScheduler task on one of the engine's own
+// 256 KB stacks, not the thread's real stack. Creating multisampled surfaces
+// runs deep into the graphics driver, which uses structured exceptions
+// internally; Windows refuses to dispatch an exception whose stack pointer
+// lies outside the thread's registered stack and kills the process on the
+// spot - no handler runs, so nothing reached crash.log. Present() is called
+// from main_loop on the real stack, so the driver work is safe there.
+void MarniDX::SetMsaa(int samples)
+{
+    Impl* p = m_pImpl;
+    if (!p) return;
+    if (samples != 2 && samples != 4 && samples != 8) samples = 1;
+    p->msaa = samples;
+    if (p->ready) p->sceneDirty = TRUE;
+}
+
+int MarniDX::GetMsaa() const { return m_pImpl ? m_pImpl->msaaActive : 1; }
+
+void MarniDX::SetCrtShader(BOOL on)
+{
+    Impl* p = m_pImpl;
+    if (!p) return;
+    p->crtShader = on ? TRUE : FALSE;
+    if (p->ready) p->sceneDirty = TRUE;     // see SetMsaa
+}
+
+BOOL MarniDX::GetCrtShader() const { return m_pImpl ? m_pImpl->crtShader : FALSE; }
 
 // ============================================================================
 // Texture handles
@@ -1409,9 +1958,14 @@ BOOL MarniDX::CaptureBackbufferToRGBA(void** outPixels, DWORD* outW, DWORD* outH
     if (!p || !p->ready || !p->swapChain || !p->device || !p->context)
         return FALSE;
 
-    ID3D11Texture2D* bb = nullptr;
-    if (FAILED(p->swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)))
+    // Port-added: with MSAA / the CRT shader the frame being drawn is in the
+    // offscreen scene, not the back buffer.
+    ID3D11Texture2D* bb = p->ResolvedScene();
+    if (bb != nullptr) {
+        bb->AddRef();
+    } else if (FAILED(p->swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) {
         return FALSE;
+    }
 
     D3D11_TEXTURE2D_DESC bd;
     bb->GetDesc(&bd);

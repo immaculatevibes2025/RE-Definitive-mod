@@ -20,6 +20,7 @@
 // all recovered from assets/ResidentEvil.exe (see tools/mine_effect_tables.py
 // for the table dumps).
 #include "../Globals.h"
+#include "BattleGame.h"
 #include "SpriteRenderer.h"
 #include "Entities.h"
 #include "BioCard.h"
@@ -626,7 +627,9 @@ static void effect_behavior_set_frame(void)
 // room_check_sight_blocked's [group[cell], group[cell+1]); both are reproduced
 // from their own assembly.
 // ============================================================================
-static unsigned short effect_probe_ground(SVECTOR* pos, SVECTOR* offset, unsigned int radius)
+// Not static: the Saturn Tick mod (entities/Hunter.cpp) uses it as the
+// equivalent of the Saturn's forward probe.
+unsigned short effect_probe_ground(SVECTOR* pos, SVECTOR* offset, unsigned int radius)
 {
     if (g_RdtPointer == NULL || g_RdtPointer->boundaries == NULL) return 0;
 
@@ -2626,6 +2629,9 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
     }
     static const unsigned char kRoomArtNoTint[3] = { 0xff, 0xff, 0xff };
     if (roomArt) color = kRoomArtNoTint;
+    // Mod: the Battle Game Man Spider's borrowed Black Tiger acid, tinted green.
+    static const unsigned char kManSpiderAcid[3] = { 0x60, 0xff, 0x40 };
+    if (eff->effectType == 0x1E && battle_man_spider_active()) color = kManSpiderAcid;
 
     unsigned int stage = get_stage_id();
     if (stage > 4) stage -= 5;

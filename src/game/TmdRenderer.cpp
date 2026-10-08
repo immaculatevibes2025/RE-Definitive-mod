@@ -132,6 +132,7 @@ static_assert(sizeof(TmdDrawEntry) == 20, "TmdDrawEntry must stay 20 bytes");
 static TmdDrawEntry  g_tmdQueue[TMD_MAX_QUEUE];
 static int           g_tmdQueueCount = 0;
 static TmdLightState* g_tmdLight = NULL;   // TMD_MAX_QUEUE records, heap, never freed
+bool g_tmdKeepQueue = false;   // set by FrameRateGovernor's interpolated pass
 
 // Per-frame triangle pool. Triangles from every queued object are gathered here
 // and submitted only after a global depth sort (see FlushTmdObjects).
@@ -474,6 +475,10 @@ void FlushTmdObjects(void)
             // Read the transform and texture handle now (see TmdQueueObject):
             // both are written to the object entry after it was queued.
             const float* M = (const float*)(e->objData + 0x08);
+            // Interpolated 60fps: the in-between frame draws a blend of last
+            // tick's transform and this one (Interp60 in Rendering.cpp).
+            float interpM[16];
+            M = Interp60_Matrix(e->objData, M, interpM);
             // A NULL slot marks a complex-pool entry. Those are only ever built
             // from textured triangle primitives (ComplexTmdObjectSetup filters
             // on flags == 0x34000609) and their 0x38-byte element has no +0x48
@@ -853,7 +858,8 @@ void FlushTmdObjects(void)
         FlushSpriteCommandsRange(0, maskCursor, SPRITE_CLASS_SCENE);
     }
 
-    g_tmdQueueCount = 0;
+    // The interpolated 60fps pass draws the same queue twice per tick.
+    if (!g_tmdKeepQueue) g_tmdQueueCount = 0;
 }
 
 // (0x00481660) - Update entity lighting from RDT point lights

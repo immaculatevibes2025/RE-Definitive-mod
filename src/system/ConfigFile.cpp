@@ -43,6 +43,18 @@ const OwnedKey kOwnedKeys[] = {
     { "Player",  "ClearCount" },
     { "Input",   "KeyDef" },
     { "Input",   "SideDef" },
+    { "Display", "Aspect" },     // port-added (Video Options menu)
+    { "Display", "MSAA" },       // port-added (Video Options menu)
+    { "Display", "CRT" },        // port-added (Video Options menu)
+    { "Sound",   "MusicVolume" },    // port-added (title OPTIONS > SOUND OPTIONS)
+    { "Sound",   "EffectsVolume" },  // port-added (title OPTIONS > SOUND OPTIONS)
+    { "Sound",   "VoiceVolume" },    // port-added (Option Mode > SOUND)
+    { "Mods",    "Ticks" },          // port-added (Option Mode > GAMEPLAY)
+    { "Mods",    "QuickKnife" },     // port-added (Option Mode > GAMEPLAY)
+    { "Mods",    "QuickTurn" },      // port-added (Option Mode > GAMEPLAY)
+    { "Mods",    "Reload" },         // port-added (Option Mode > GAMEPLAY)
+    { "Input",   "PadDef" },         // port-added: the GAME PAD bindings (g_JoyRemapTbl[1])
+    { "Display", "Interpolate60" },  // port-added (Option Mode > VIDEO, F2 menu)
 };
 const int kOwnedKeyCount = (int)(sizeof(kOwnedKeys) / sizeof(kOwnedKeys[0]));
 
@@ -162,7 +174,7 @@ const char* ResolveConfiguredPath(const char* exeDir, const char* value,
 }
 
 // Static line pool for keys that have to be inserted rather than replaced.
-char s_newLine[16][700];
+char s_newLine[64][700];      // mod: room for every owned key
 int  s_newLineUsed = 0;
 
 void SetValue(const char* section, const char* key, const char* value,
@@ -203,14 +215,14 @@ void SetValue(const char* section, const char* key, const char* value,
         if ((size_t)(keyEnd - p) != keyLen || strncmp(p, key, keyLen) != 0) continue;
 
         // Replace in place.
-        if (s_newLineUsed < 16) {
+        if (s_newLineUsed < 64) {
             snprintf(s_newLine[s_newLineUsed], sizeof(s_newLine[0]), "%s=%s", key, value);
             lines[i] = s_newLine[s_newLineUsed++];
         }
         return;
     }
 
-    if (*count + 3 >= MAX_LINES || s_newLineUsed + 3 > 16) return;
+    if (*count + 3 >= MAX_LINES || s_newLineUsed + 3 > 64) return;
 
     if (sectionHeader < 0) {
         // Unknown section: append it whole.
@@ -233,6 +245,24 @@ void SetValue(const char* section, const char* key, const char* value,
 }
 
 }  // namespace
+
+// Port-added: [Sound] MusicVolume / EffectsVolume, 0-10 (10 = full). Owned by
+// VideoMenu.cpp's SOUND OPTIONS, applied through MarniSound_SetVolumes.
+DWORD g_dwMusicVolume = 10;
+DWORD g_dwEffectsVolume = 10;
+DWORD g_dwVoiceVolume = 10;
+DWORD g_dwTestArmorKey = 0;     // [Testing] ArmorKey (GameStart.cpp)
+DWORD g_dwTestShieldKey = 0;    // [Testing] ShieldKey (GameStart.cpp)
+bool  g_bQuickKnife = false;     // [Mods] QuickKnife (Option Mode > GAMEPLAY)
+bool  g_bQuickTurn  = false;     // [Mods] QuickTurn  (Option Mode > GAMEPLAY)
+bool  g_bReloadButton = false;   // [Mods] Reload     (Option Mode > GAMEPLAY)
+extern BOOL g_bInterpolate60;    // Rendering.cpp: [Display] Interpolate60
+bool  g_bTickAlwaysDecap = false; // [Mods] TickAlwaysDecapitate (testing)
+bool  g_bBattleTicks = false;     // [BattleGame] Ticks
+int   g_testStartCourtyard = 0;   // [Testing] StartCourtyard (GameStart.cpp)
+int   g_testStartBeforeYawn = 0;  // [Testing] StartBeforeYawn (GameStart.cpp)
+extern void MarniSound_SetVoiceVolume(int step);
+extern void MarniSound_SetVolumes(int musicStep, int sfxStep);   // MarniSound.cpp
 
 // ---------------------------------------------------------------------------
 const char* ConfigFile_Find(void)
@@ -343,7 +373,7 @@ void ConfigFile_EnsureExists(void)
         "\n"
         "[Display]\n"
         "; 0 = windowed, 1 = fullscreen\n"
-        "FullScreen=%d\n"
+        "FullScreen=1\n"
         "; Resolution width\n"
         "Width=%u\n"
         "; Resolution height\n"
@@ -353,6 +383,26 @@ void ConfigFile_EnsureExists(void)
         "; Wait for vblank on present. 0 = off (default, and what the original did\n"
         "; in a window): the engine paces itself to 33 ms per tick in software.\n"
         "VSync=%d\n"
+        "; Aspect ratio: 1 = Normal (4:3 with black bars), 3 = Widescreen (16:9\n"
+        "; pan-and-scan; the scene is cropped vertically to follow the player). Also in the F2\n"
+        "; Video Options menu.\n"
+        "Aspect=1\n"
+        "; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples. Also in the\n"
+        "; F2 Video Options menu.\n"
+        "MSAA=1\n"
+        "; 1 = CRT shader (CRT-Royale style scanlines, phosphor mask, curvature).\n"
+        "; Also in the F2 Video Options menu.\n"
+        "CRT=0\n"
+        "; 1 = interpolated 60fps: game logic stays at 30 ticks/s, an in-between\n"
+        "; frame blends character and object movement.\n"
+        "Interpolate60=0\n"
+        "\n"
+        "[Sound]\n"
+        "; Music and sound-effect volume, 0 (off) to 10 (full). Also in the title\n"
+        "; screen's OPTIONS > SOUND OPTIONS.\n"
+        "MusicVolume=%u\n"
+        "EffectsVolume=%u\n"
+        "VoiceVolume=%u\n"
         "\n"
         "[Assets]\n"
         "; Folder that holds the USA/ and JPN/ data trees. Relative paths are\n"
@@ -394,34 +444,56 @@ void ConfigFile_EnsureExists(void)
         "; cutscenes unskippable; set this to 1 to make those skippable too.\n"
         "SkipUnskippableFmv=%d\n"
         "\n"
+        "[Mods]\n"
+        "; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard\n"
+        "; tunnels on (STAGE3), as on the Saturn; the mansion Hunters stay.\n"
+        "; Loads enemy/em1016.emd and em1116.emd (tools/saturn/tick2pc.py), the\n"
+        "; Tick's close-range decapitation and sounds (sound/TK_*.wav from\n"
+        "; tools/saturn/ticksnd.py). Anything missing falls back to the Hunter.\n"
+        "; OG mode only.\n"
+        "Ticks=0\n"
+        "; Option Mode > GAMEPLAY: 1 = on.\n"
+        "QuickKnife=0\n"
+        "QuickTurn=0\n"
+        "Reload=0\n"
+        "\n"
+        "[BattleGame]\n"
+        "; The Sega Saturn Battle Game (title menu, BATTLE GAME). Like the Saturn,\n"
+        "; it appears once the game has been finished ([Player] ClearCount > 0).\n"
+        "; 1 = always offer it. Needs data/t_battle.tim and battle/ROOM80x0.RDT\n"
+        "; (tools/saturn/battle_title.py, battle2pc.py). OG mode, USA assets.\n"
+        "AlwaysUnlocked=0\n"
+        "; Stage 15 ending shot (camera circles the player against black).\n"
+        "; 0 = keep the room view so the boss's death plays out on screen.\n"
+        "EndingShot=1\n"
+        "\n"
         "[Debug]\n"
         "; Master switch for the port-added debug features: F1 debug menu, F6\n"
         "; texture viewer, F8 collision overlay. 0 = off, 1 = on.\n"
-        "EnableDebug=%d\n"
+        "EnableDebug=0\n"
         "\n"
         "[Player]\n"
         "PlayCount=%u\n"
         "ClearCount=%u\n"
         "\n"
         "[Input]\n"
-        "; 32 keyboard virtual-key codes, then 128 bytes of pad bindings, as hex.\n"
-        "KeyDef=%s\n"
-        "SideDef=%s\n",
-        g_bFullScreen ? 1 : 0,
+        "; Input debugging: InputLog=1 writes input_log.txt; Gamepad=0 ignores controllers.\n"
+        "InputLog=0\n"
+        "Gamepad=1\n"
+        "; Keyboard, side and game-pad bindings as hex (the shipped default layout).\n"
+        "KeyDef=5753414400100000000002010009000000000000000000005251451B110D201B\n"
+        "SideDef=0010000000400000008000000020000000000000000000000000000000000000800000000000000040000000000800000000000000000000000000000800000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n"
+        "PadDef=0010000000400000008000000020000000100000004000000080000000200000800000000000040040000000000000000000010000000000000900000008000000000000000000000000020008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n",
         (unsigned)g_dwScreenWidth, (unsigned)g_dwScreenHeight,
         (unsigned)g_dwBitDepth, g_bVSync ? 1 : 0,
+        (unsigned)g_dwMusicVolume, (unsigned)g_dwEffectsVolume, (unsigned)g_dwVoiceVolume,
         (GetAssetVersion() == 1) ? "JPN" : "USA",
         GameModeName(g_GameMode),
         g_bPs1EndingCredits ? 1 : 0,
         g_bPs1FmvSubtitles ? 1 : 0,
         g_bSkipUnskippableFmv ? 1 : 0,
-#ifdef _DEBUG
-        1,
-#else
-        0,
-#endif
-        (unsigned)g_dwPlayCount, (unsigned)g_dwClearCount,
-        keyHex, sideHex);
+        (unsigned)g_dwPlayCount, (unsigned)g_dwClearCount);
+    (void)keyHex; (void)sideHex;
 
     fclose(f);
     dbg_printf("[CONFIG] created %s\n", path);
@@ -447,6 +519,23 @@ BOOL ConfigFile_Load(void)
     g_dwScreenHeight = (DWORD)ReadInt(path, "Display", "Height", (int)g_dwScreenHeight);
     g_dwBitDepth     = (DWORD)ReadInt(path, "Display", "BitDepth", (int)g_dwBitDepth);
     g_bVSync         = ReadInt(path, "Display", "VSync", g_bVSync ? 1 : 0) ? TRUE : FALSE;
+    // Port-added (Video Options menu): MARNI_ASPECT_* 0..2, anything else = 0.
+    g_dwAspectMode   = (DWORD)ReadInt(path, "Display", "Aspect", (int)g_dwAspectMode);
+    // Only Normal (4:3) and Widescreen are offered now; anything else is Normal.
+    if (g_dwAspectMode != MARNI_ASPECT_WIDE) g_dwAspectMode = MARNI_ASPECT_4_3;
+    // Port-added (Video Options menu): MSAA 1/2/4/8 (anything else = off), CRT.
+    g_dwMsaa         = (DWORD)ReadInt(path, "Display", "MSAA", (int)g_dwMsaa);
+    if (g_dwMsaa != 2 && g_dwMsaa != 4 && g_dwMsaa != 8) g_dwMsaa = 1;
+    g_bCrtShader     = ReadInt(path, "Display", "CRT", g_bCrtShader ? 1 : 0) ? TRUE : FALSE;
+    // Port-added (title OPTIONS > SOUND OPTIONS): 0-10.
+    g_dwMusicVolume   = (DWORD)ReadInt(path, "Sound", "MusicVolume", (int)g_dwMusicVolume);
+    g_dwEffectsVolume = (DWORD)ReadInt(path, "Sound", "EffectsVolume", (int)g_dwEffectsVolume);
+    if (g_dwMusicVolume > 10) g_dwMusicVolume = 10;
+    if (g_dwEffectsVolume > 10) g_dwEffectsVolume = 10;
+    MarniSound_SetVolumes((int)g_dwMusicVolume, (int)g_dwEffectsVolume);
+    g_dwVoiceVolume = (DWORD)ReadInt(path, "Sound", "VoiceVolume", (int)g_dwVoiceVolume);
+    if (g_dwVoiceVolume > 10) g_dwVoiceVolume = 10;
+    MarniSound_SetVoiceVolume((int)g_dwVoiceVolume);
 
     // Same clamps the Windows build applied.
     if (g_dwScreenWidth < 320) g_dwScreenWidth = 640;
@@ -462,8 +551,33 @@ BOOL ConfigFile_Load(void)
     if (ReadValue(path, "Input", "KeyDef", buf, sizeof(buf))) {
         HexDecode(buf, g_keyBindingData, (int)sizeof(g_keyBindingData));
     }
+    // Mod: undo the '_' an earlier options-menu bug wrote over the arrows.
+    {
+        static const BYTE kArrow[4] = { 0x26, 0x28, 0x25, 0x27 };   // up down left right
+        for (int k = 0; k < 4; k++) {
+            if (g_keyBindingData[k] == 0x5f || g_keyBindingData[k] == 0) g_keyBindingData[k] = kArrow[k];
+        }
+    }
+    // Mod: QUICK TURN lives in keyboard slot 26, empty in older KeyDefs.
+    if (g_keyBindingData[26] == 0) g_keyBindingData[26] = 'Q';
+    if (g_keyBindingData[25] == 0) g_keyBindingData[25] = 'E';   // QUICK KNIFE
+    g_bQuickKnife = ReadInt(path, "Mods", "QuickKnife", 0) != 0;
+    g_bQuickTurn  = ReadInt(path, "Mods", "QuickTurn", 0) != 0;
+    g_bReloadButton = ReadInt(path, "Mods", "Reload", 0) != 0;
+    if (g_keyBindingData[24] == 0) g_keyBindingData[24] = 'R';   // RELOAD
     if (ReadValue(path, "Input", "SideDef", buf, sizeof(buf))) {
         HexDecode(buf, g_joystickBindingData, (int)sizeof(g_joystickBindingData));
+    }
+    {
+        extern DWORD g_dwGamepadEnabled, g_dwInputLog;   // InputSystem.cpp
+        g_dwGamepadEnabled = (DWORD)ReadInt(path, "Input", "Gamepad", 1);
+        g_dwInputLog       = (DWORD)ReadInt(path, "Input", "InputLog", 0);
+        g_dwTestArmorKey   = (DWORD)ReadInt(path, "Testing", "ArmorKey", 0);
+        g_dwTestShieldKey  = (DWORD)ReadInt(path, "Testing", "ShieldKey", 0);
+    }
+    // Mod: the GAME PAD bindings, set in Option Mode and shared by every save.
+    if (ReadValue(path, "Input", "PadDef", buf, sizeof(buf)) && buf[0] != '\0') {
+        HexDecode(buf, (BYTE*)g_JoyRemapTbl[1], 128);
     }
 
     // Asset and save folders. [Assets] Path is the folder that holds the USA/
@@ -514,6 +628,31 @@ BOOL ConfigFile_Load(void)
     // Port-added: overrides the per-FMV skip mask so the movies the original
     // marks unskippable can be skipped too. Off unless the key is set.
     g_bSkipUnskippableFmv = ReadInt(path, "Game", "SkipUnskippableFmv", 0) != 0;
+    // Mod: Saturn Ticks replace Hunters. OG content only - the DC overlay
+    // uses em1016 for its own zombie model.
+    // DC too: the Tick model is read from TK1016/TK1116 there (EntityModelLoader).
+    g_bModTicks = ReadInt(path, "Mods", "Ticks", 0) != 0;
+    if (g_bModTicks) dbg_printf("[CONFIG] mod: Saturn Ticks enabled\n");
+    g_bTickAlwaysDecap = ReadInt(path, "Mods", "TickAlwaysDecapitate", 0) != 0;
+    g_bInterpolate60   = ReadInt(path, "Display", "Interpolate60", 0) ? TRUE : FALSE;
+    // Mod: the Saturn Battle Game is offered on the title once the game has
+    // been cleared; this offers it regardless (BattleGame.cpp).
+    g_bBattleAlwaysUnlocked = ReadInt(path, "BattleGame", "AlwaysUnlocked", 0) != 0;
+    {
+        extern bool g_bBattleInvincible;    // BattleGame.cpp
+        g_bBattleInvincible = ReadInt(path, "BattleGame", "Invincible", 0) != 0;
+        extern int g_battleStartRoom;       // BattleGame.cpp
+        g_battleStartRoom = ReadInt(path, "BattleGame", "StartRoom", 1);
+        extern bool g_bBattleManSpider;     // BattleGame.cpp
+        g_bBattleManSpider = ReadInt(path, "BattleGame", "ManSpider", 0) != 0;
+        extern bool g_bManSpiderAlwaysDecap;  // BattleGame.cpp
+        g_bManSpiderAlwaysDecap = ReadInt(path, "BattleGame", "ManSpiderAlwaysDecapitate", 0) != 0;
+        extern bool g_bBattleEndingShot;    // BattleGame.cpp
+        g_bBattleEndingShot = ReadInt(path, "BattleGame", "EndingShot", 1) != 0;
+        g_bBattleTicks = ReadInt(path, "BattleGame", "Ticks", 0) != 0;
+        g_testStartCourtyard  = ReadInt(path, "Testing", "StartCourtyard", 0);
+        g_testStartBeforeYawn = ReadInt(path, "Testing", "StartBeforeYawn", 0);
+    }
     dbg_printf("[CONFIG] mode=%s overlay=%s ps1_credits=%d\n", GameModeName(g_GameMode),
                GetAssetModeName()[0] ? GetAssetModeName() : "(none)",
                g_bPs1EndingCredits ? 1 : 0);
@@ -572,6 +711,22 @@ void ConfigFile_Save(void)
     snprintf(values[6], sizeof(values[6]), "%u", (unsigned)g_dwClearCount);
     snprintf(values[7], sizeof(values[7]), "%s", keyHex);
     snprintf(values[8], sizeof(values[8]), "%s", sideHex);
+    snprintf(values[9], sizeof(values[9]), "%u", (unsigned)g_dwAspectMode);
+    snprintf(values[10], sizeof(values[10]), "%u", (unsigned)g_dwMsaa);
+    snprintf(values[11], sizeof(values[11]), "%d", g_bCrtShader ? 1 : 0);
+    snprintf(values[12], sizeof(values[12]), "%u", (unsigned)g_dwMusicVolume);
+    snprintf(values[13], sizeof(values[13]), "%u", (unsigned)g_dwEffectsVolume);
+    snprintf(values[14], sizeof(values[14]), "%u", (unsigned)g_dwVoiceVolume);
+    snprintf(values[15], sizeof(values[15]), "%d", g_bModTicks ? 1 : 0);
+    snprintf(values[16], sizeof(values[16]), "%d", g_bQuickKnife ? 1 : 0);
+    snprintf(values[17], sizeof(values[17]), "%d", g_bQuickTurn ? 1 : 0);
+    snprintf(values[18], sizeof(values[18]), "%d", g_bReloadButton ? 1 : 0);
+    {
+        char padHex[128 * 2 + 1];
+        HexEncode((const BYTE*)g_JoyRemapTbl[1], 128, padHex);
+        snprintf(values[19], sizeof(values[19]), "%s", padHex);
+    }
+    snprintf(values[20], sizeof(values[20]), "%d", g_bInterpolate60 ? 1 : 0);
 
     for (int i = 0; i < kOwnedKeyCount; ++i) {
         SetValue(kOwnedKeys[i].section, kOwnedKeys[i].key, values[i], lines, &count);

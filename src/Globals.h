@@ -71,6 +71,9 @@ extern DWORD         g_dwSelectedDisplayModeID;        // 0x007d914c
 extern DWORD         g_dwScreenWidth;                  // 0x007d9150
 extern DWORD         g_dwScreenHeight;                 // 0x007d9154
 extern BOOL          g_bFullScreen;
+extern DWORD         g_dwAspectMode;                   // config.ini [Display] Aspect (MARNI_ASPECT_*), port-added
+extern DWORD         g_dwMsaa;                         // config.ini [Display] MSAA (1/2/4/8), port-added
+extern BOOL          g_bCrtShader;                     // config.ini [Display] CRT, port-added
 extern BOOL          g_bVSync;                         // config.ini [Display] VSync                    // 0x007d9158
 extern int           g_dwBitDepth;                     // 0x004d642c
 extern DWORD         g_GPU_VENDOR_ID;                  // 0x004bcb64
@@ -471,6 +474,13 @@ extern bool          g_bPs1FmvSubtitles;      // [Game] Ps1FmvSubtitles
 // per-FMV mask table (0x004c39dc) marks 0x0000 - the endings, the staff rolls
 // and DMF/DME. Off by default, so the original's masks are what ship.
 extern bool          g_bSkipUnskippableFmv;    // [Game] SkipUnskippableFmv
+// Mod: Sega Saturn Ticks in place of Hunters ([Mods] Ticks). Loads
+// enemy/em1016.emd / em1116.emd for entity type 6 when present, and runs the
+// Saturn Tick's close-range decapitation logic (entities/Hunter.cpp). OG only.
+extern bool          g_bModTicks;              // [Mods] Ticks
+// Mod: the Sega Saturn Battle Game is on the title menu even before the game
+// has been finished ([BattleGame] AlwaysUnlocked). See game/BattleGame.cpp.
+extern bool          g_bBattleAlwaysUnlocked;  // [BattleGame] AlwaysUnlocked
 
 // Every "are we in Director's Cut mode" test in the port. Deliberately a macro
 // over g_GameMode rather than a second global: there is one stored value, so
@@ -551,6 +561,20 @@ int  re1_rand(void);
 // over g_BioCard, which is declared further down this header. It reads the
 // field twice, which is safe - it is a plain byte with no side effects.
 #define get_stage_id() STAGE_DATA_ROW_OF(g_stageId)
+
+// Mod ([Mods] Ticks): where the Saturn has Ticks. It never swaps a Hunter for
+// a Tick in code - each room's own data places one or the other - and the
+// Tick rooms are STAGE3's (courtyard / underground: ROOM3080-30B0, the only
+// rooms whose PC sound rows use the He_* set). The mansion-revisit Hunters
+// (stages 5/6) stay Hunters, as on the Saturn.
+#define MOD_TICKS_STAGE 2   // 0-based: STAGE3
+// Not in the Saturn Battle Game: its room 9 (a copy of ROOM3090) keeps its
+// Hunters even though it is a STAGE3 room.
+extern int g_battleActive;          // BattleGame.cpp
+// [BattleGame] Ticks=1 swaps every Battle Game Hunter for a Tick instead.
+extern bool g_bBattleTicks;         // ConfigFile.cpp
+#define mod_ticks_active() ((g_bModTicks && get_stage_id() == MOD_TICKS_STAGE && !g_battleActive) || \
+                            (g_bBattleTicks && g_battleActive))
 
 // The same fold applied to a stage id that is not g_stageId - the one the FILE
 // paths use, which in ADVANCED can be the arrange twin of the stage the game
@@ -674,6 +698,8 @@ extern int           g_debugTextureViewerOpen;   // 1 while the overlay is activ
 int texture_viewer_overlay(void);                 // DebugScreens.cpp - per-frame overlay; 0 when closed
 extern int           g_debugMenuOpen;            // 1 while the F1 debug menu overlay is open
 int debug_menu_overlay(void);                     // DebugMenu.cpp - F1 overlay; 1 while open
+extern int           g_videoMenuOpen;            // 1 while the F2 Video Options overlay is open (pauses like F1)
+int video_menu_overlay(void);                     // VideoMenu.cpp - F2 overlay; 1 while open
 void DebugRoomChange_ApplyPendingPlacement(void); // DebugMenu.cpp - post room_transition_load placement
 extern int           g_debugLoadSlot;             // quick access load: selected slot index (0-7)
 void DebugQuick_SaveSlot(int slot);               // DebugSaveLoad.cpp - write a full save to savedat<slot+1>.dat

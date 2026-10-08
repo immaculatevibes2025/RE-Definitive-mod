@@ -7,14 +7,11 @@
 // OnKeyDown - Handle keyboard input (0x00497830)
 //
 // F1 (0x70): Cycles g_F1DebugMode through 0-3
-// F9 (0x78): Complex escape/return-to-title logic with debounce and state checks
+// F9 (0x78): Mod - removed (QUIT GAME is in Option Mode and on the title)
 // Any other key: Clears g_displayReturnToTitleScreen_Flag and g_displayExitGameScreen_flag
 // ============================================================================
 void OnKeyDown(HWND hwnd, WPARAM wparam)
 {
-	bool bBlocked;
-	DWORD now;
-
 	switch (wparam) {
 	case VK_F1: // 0x70
 		g_F1DebugMode++;
@@ -23,57 +20,11 @@ void OnKeyDown(HWND hwnd, WPARAM wparam)
 		}
 		break;
 
-	case VK_F9: // 0x78
-		now = timeGetTime();
-
-		// Debounce/cooldown: block if within 3 seconds of game init
-		bBlocked = (now < g_GameInitTime + 3000);
-		// Block if within 2ms of last F9 press
-		if ((now < g_lastF9PressTime) || (now - g_lastF9PressTime < 2)) {
-			bBlocked = true;
-		}
-		// Don't block if already showing a dialog
-		if (g_displayReturnToTitleScreen_Flag != 0 || g_displayExitGameScreen_flag != 0) {
-			bBlocked = false;
-		}
-		// Block during MCI video playback
-		if (g_mciVideoDeviceID != 0) {
-			bBlocked = true;
-		}
-		// Block if block flag is set
-		if (g_blockF9Flag == 1) {
-			bBlocked = true;
-		}
-
-		if (!bBlocked) {
-			if (g_playingGameFlag == 0) {
-				// Title/menu: toggle exit dialog
-				if (g_displayExitGameScreen_flag == 0) {
-					g_displayExitGameScreen_flag = 1;
-				} else {
-					g_displayExitGameScreen_flag = 0;
-					CleanupVideoConfigAndSaveAllSettings();
-					DestroyWindow(g_hWnd);
-				}
-			} else if (g_displayReturnToTitleScreen_Flag == 0) {
-				// In-game: set return-to-title flag
-				g_displayReturnToTitleScreen_Flag = 1;
-			} else {
-				// In-game, already returning: toggle off and trigger reset
-				g_displayReturnToTitleScreen_Flag = 0;
-				g_pressF9Flag = 0;
-				g_resetGameFlag = 1;
-			}
-		}
-		g_lastF9PressTime = now;
-		break;
 	}
 
-	// Any key other than F9 clears the dialog flags
-	if (wparam != VK_F9) {
-		g_displayReturnToTitleScreen_Flag = 0;
-		g_displayExitGameScreen_flag = 0;
-	}
+	// Mod: the F9 dialogs are gone - keep their flags clear.
+	g_displayReturnToTitleScreen_Flag = 0;
+	g_displayExitGameScreen_flag = 0;
 }
 
 // ============================================================================
@@ -109,10 +60,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     g_bMCIVideoEvent = TRUE;
                 }
                 PauseSounds();
+                // Mod: fullscreen is a screen-sized WS_EX_TOPMOST window, so
+                // after Alt-Tab it stayed above whatever was switched to.
+                // Drop out of the top-most band and minimise to the taskbar,
+                // the way a fullscreen game should get out of the way.
+                if (g_bFullScreen) {
+                    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+                }
             } else {
                 // Window activated
                 g_bWindowFocused = TRUE;
                 ResumePausedSounds();
+                // Mod: coming back - restore and take the top-most band again.
+                if (g_bFullScreen) {
+                    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
             }
             break;
         

@@ -6,7 +6,9 @@
 #include "FileLoader.h"
 #include <cstdio>
 #include "../system/AssetPath.h"
+#include "../platform/platform.h"   // plat_normalize_path (mod: emd_asset_exists)
 #include "dc/EntityModels.h"
+#include "BattleGame.h"       // battle_emd_override (Saturn Battle Game mod)
 #include "dc/Items.h"        // DC_ITEM_BERETTA_CUSTOM
 
 // ============================================================================
@@ -469,6 +471,26 @@ void InitScaMatrix(int param1, ScaMatrixData* scaData)
     }
 }
 
+// Port-added (mod support): does a file under the data root exist? Resolves the
+// path exactly as LoadFile does (asset root, overlay, case-insensitive match)
+// so a missing optional model can fall back instead of failing the load.
+bool mod_asset_exists(const char* relPath)
+{
+    char rooted[260];
+    char resolved[260];
+    char normalized[260];
+    snprintf(rooted, sizeof(rooted), "%s%s", GAME_DATA_ROOT, relPath);
+    const char* p = ResolveAssetRoot(rooted, resolved, sizeof(resolved));
+    p = plat_normalize_path(p, normalized, sizeof(normalized));
+    FILE* f = fopen(p, "rb");
+    if (f == NULL) {
+        dbg_printf("[mod] %s not found - using the original model\n", relPath);
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
 // ============================================================================
 // LoadEntityEMD (0x00462370) - Load entity EMD model file
 // Loads the EMD 3D model for the player or enemy entity.
@@ -479,8 +501,13 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
     unsigned char bVar5 = g_TextureBankID;
     unsigned char bVar6 = g_TextureCurrentPage;
 
+    // Mod: g_bCostumeVariant 2 = the Saturn outfit, loaded from its own file
+    // below; it uses the second outfit's table slot for everything else.
+    const bool saturnOutfit = (g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 &&
+                              entity_id < 2 && g_bCostumeVariant == 2;
+    const unsigned int costumeSlot = (g_bCostumeVariant == 2) ? 1u : (unsigned int)g_bCostumeVariant;
     if ((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && entity_id < 2) {
-        entity_id = (unsigned char)g_bCostumeVariant + 0x33;
+        entity_id = (unsigned char)(costumeSlot + 0x33);
     }
 
     // DC ADVANCED remaps the player and three cutscene NPCs onto its own
@@ -499,13 +526,54 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
         }
     }
 
+    // Mod: Saturn Ticks. The Saturn release loads the Tick as em1016/em1116
+    // (its own table index 22, same 53-entry block split as here); the PC
+    // conversion keeps the Hunter's skeleton and animations, so it drops in
+    // for entity type 6. Missing files fall back to the Hunter.
+    //
+    // entity_id is the TABLE index, not the entity type: enemies are loaded
+    // as LoadEntityEMD(ENTITY, ENTITY->id + 4) (RoomInit.cpp), after the four
+    // player entries. The Hunter (type 6) is index 10; index 6 is em1002, the
+    // Cerberus, which is what this used to swap.
+    if (mod_ticks_active() && entity_id == 6 + 4) {
+        // DC: its overlay's own EM1016/EM1116 (the Forest zombie) would shadow
+        // the Tick's, so the DC reads the Tick from TK1016 / TK1116 instead.
+        const char* tickPath = g_bDcMode
+            ? ((g_playerEntity.id & 1) ? "enemy/tk1116.emd" : "enemy/tk1016.emd")
+            : ((g_playerEntity.id & 1) ? "enemy/em1116.emd" : "enemy/em1016.emd");
+        if (mod_asset_exists(tickPath)) {
+            emdPath = tickPath;
+        }
+    }
+
+    if (saturnOutfit) {
+        // DC: the overlay ships its own EM1035, so the Saturn outfit is ST1034/5 there.
+        const char* satPath = g_bDcMode
+            ? ((g_playerEntity.id & 1) ? "enemy/st1035.emd" : "enemy/st1034.emd")
+            : ((g_playerEntity.id & 1) ? "enemy/em1035.emd" : "enemy/em1034.emd");
+        if (mod_asset_exists(satPath)) {
+            emdPath = satPath;
+        }
+    }
+
+    // Mod: Saturn Battle Game - Zombie Wesker's model (em1017/em1117).
+    if (const char* battlePath = battle_emd_override(em, entity_id)) {
+        emdPath = battlePath;
+    }
+
     sprintf(FILE_PATH, "%s%s", GAME_DATA_ROOT, emdPath);
     SetSpriteBufferFlag();
 
     unsigned int fileSize = LoadFile(FILE_PATH, g_loadDataDestPointer, 32);
     int data_pointer = (int)g_loadDataDestPointer;
+    {   // Mod: diagnostics (Man Spider crash)
+        extern void crashlog_mark(const char* step);
+        char msg[200];
+        sprintf(msg, "emd: %s idx=%d size=%u at %p", emdPath, (int)entity_id, fileSize, (void*)data_pointer);
+        crashlog_mark(msg);
+    }
 
-    if ((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && (unsigned int)g_bCostumeVariant - entity_id == -51) {
+    if ((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && costumeSlot - entity_id == (unsigned int)-51) {
         entity_id = g_playerEntity.id & 1;
     }
 

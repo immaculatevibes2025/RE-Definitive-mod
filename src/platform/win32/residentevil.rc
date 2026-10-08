@@ -1,0 +1,4 @@
+// Mod: the executable / window icon - the original 1997 PC icon (ResidentEvil.exe,
+// one 32x32 16-colour image) scaled to 16-256 px. Id 103 is the one the
+// window class loads (win32/main.cpp: LoadIconA(g_hInstance, MAKEINTRESOURCEA(103))).
+103 ICON "residentevil.ico"

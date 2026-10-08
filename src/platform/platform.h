@@ -128,6 +128,24 @@ void plat_window_destroy(HWND window);
 void plat_cursor_show(BOOL show);
 
 // ---------------------------------------------------------------------------
+// Display mode (port-added, the Video Options menu)
+//
+// plat_display_size: the full resolution of the monitor the game window is
+// on - what borderless fullscreen renders at. plat_display_work_size: the
+// largest client area a window can have on it (taskbar and window frame
+// taken off), the limit for the windowed resolution list.
+//
+// plat_apply_video_mode switches the game window between a windowed client
+// area of `width` x `height`, centred, and borderless fullscreen on its
+// monitor (always the monitor's own resolution, the sharpest the 2D art gets;
+// width/height are then ignored). The renderer follows through its usual
+// resize path (WM_SIZE / the SDL drawable size), so callers do nothing more.
+// ---------------------------------------------------------------------------
+void plat_display_size(DWORD* outWidth, DWORD* outHeight);
+void plat_display_work_size(DWORD* outWidth, DWORD* outHeight);
+void plat_apply_video_mode(DWORD width, DWORD height, BOOL fullScreen);
+
+// ---------------------------------------------------------------------------
 // FMV playback backend (Phase 7)
 //
 // src/video/VideoPlayback.cpp owns the 4-state machine, the per-FMV skip masks,

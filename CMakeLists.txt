@@ -11,8 +11,11 @@ cmake_minimum_required(VERSION 3.16)
 project(residentevil CXX)
 
 if(WIN32)
-    message(FATAL_ERROR
-        "Windows builds use Game.vcxproj. This CMakeLists targets Linux.")
+    # Visual Studio's Open Folder runs this on Windows; stop quietly instead
+    # of failing so it does not report "CMake Generation Failed".
+    message(STATUS
+        "Windows builds use Game.vcxproj / Game.sln. This CMakeLists targets Linux.")
+    return()
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -48,6 +51,8 @@ set(RE1_SOURCES
     src/game/ComputerLab.cpp
     src/game/DeathScreen.cpp
     src/game/DebugMenu.cpp
+    src/game/VideoMenu.cpp
+    src/game/BattleGame.cpp
     src/game/DebugSaveLoad.cpp
     src/game/DebugScreens.cpp
     src/game/DoorSystem.cpp

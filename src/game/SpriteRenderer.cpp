@@ -139,6 +139,30 @@ void FlushSpriteCommandsRange(unsigned int minDepth, unsigned int maxDepth,
             MarniDrawLine(sx0, sy0, sx1, sy1, 1.0f, color);
             continue;
         }
+        // Mod: filled disc (type 13) - x0/y0 centre, u0 radius in 1/16 px,
+        // both in the 320x240 base space. Rasterised as 1-px horizontal spans
+        // at the real output resolution (the Man Spider's acid spit).
+        if (cmd->type == 13) {
+            float cx = (float)cmd->x0 * scaleX + (float)cmd->u1 * scaleX / 16.0f;
+            float cy = (float)cmd->y0 * scaleY + (float)cmd->v1 * scaleY / 16.0f;
+            float rad = (float)cmd->u0 / 16.0f * scaleY;
+            if (rad < 1.0f) rad = 1.0f;
+            if (rad > 400.0f) rad = 400.0f;
+            int cr = (int)(cmd->r * 255.0f), cg = (int)(cmd->g * 255.0f), cb = (int)(cmd->b * 255.0f);
+            if (cr > 255) cr = 255; if (cr < 0) cr = 0;
+            if (cg > 255) cg = 255; if (cg < 0) cg = 0;
+            if (cb > 255) cb = 255; if (cb < 0) cb = 0;
+            float alpha = cmd->alpha;
+            if (alpha < 0.0f) alpha = 0.0f;
+            if (alpha > 1.0f) alpha = 1.0f;
+            DWORD color = ((DWORD)(int)(alpha * 255.0f) << 24) | ((DWORD)cr << 16) | ((DWORD)cg << 8) | (DWORD)cb;
+            int R = (int)rad;
+            for (int dy = -R; dy <= R; dy++) {
+                float hw = sqrtf(rad * rad - (float)(dy * dy));
+                MarniDrawLine(cx - hw, cy + (float)dy, cx + hw, cy + (float)dy, 1.0f, color);
+            }
+            continue;
+        }
         if (cmd->type == 12) {
             // 4-corner textured quad (ground shadows / death blood pool).
             // The original rendered the quad through a Marni viewport, so its
@@ -478,6 +502,28 @@ int SubmitLine(short x0, short y0, short x1, short y1, unsigned short depth,
     cmd->u1 = 0;
     cmd->v1 = 0;
 
+    g_SpriteQueueCount++;
+    return 1;
+}
+
+// Mod: queue a filled disc (see the type 13 case in the flush). cx16/cy16
+// and radius16 are 320x240 base coordinates in 1/16 pixel.
+int SubmitDisc(int cx16, int cy16, int radius16, unsigned short depth,
+               float r, float g, float b, float alpha)
+{
+    if (g_SpriteQueueCount >= MAX_SPRITE_COMMANDS - 1) return 0;
+    TextureDraw* cmd = &g_SpriteCommandBuffer[g_SpriteQueueCount];
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->type = 13;
+    cmd->sortClass = SPRITE_CLASS_NORMAL;
+    cmd->x0 = (short)(cx16 >> 4);
+    cmd->y0 = (short)(cy16 >> 4);
+    cmd->u1 = (short)(cx16 & 15);
+    cmd->v1 = (short)(cy16 & 15);
+    cmd->u0 = (short)(radius16 > 0x7fff ? 0x7fff : radius16);
+    cmd->depthSort = (unsigned int)depth * 16 + 500;
+    cmd->alpha = alpha;
+    cmd->r = r; cmd->g = g; cmd->b = b;
     g_SpriteQueueCount++;
     return 1;
 }

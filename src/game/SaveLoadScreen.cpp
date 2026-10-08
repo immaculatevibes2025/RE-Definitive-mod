@@ -724,12 +724,19 @@ static bool JoyRemapTableIsEmpty(const void* table)
 // 0x800 memcpy; the port models that region as g_BioCard + the input-config
 // globals, so each part is copied into its own global (the unmodeled
 // tail 0x43D..0x800 is discarded).
+int g_pendingCostumeOn = -1;   // Mod: outfit from a loaded save, -1 = none (RoomInit.cpp)
+
 static void RestoreSaveBlock(const char* fileBuffer, int fileSize)
 {
     // Keep the live pad bindings; they are the last-resort fallback if the
     // save turns out to carry nothing usable.
     DWORD liveJoyRemap[32];
     memcpy(liveJoyRemap, g_JoyRemapTbl[1], sizeof(liveJoyRemap));
+    // Mod: controls are global (config.ini, Option Mode), not per save.
+    DWORD liveKeyRemap[32];     // Mod: the keyboard table too - a save's copy
+    memcpy(liveKeyRemap, g_JoyRemapTbl[0], sizeof(liveKeyRemap));   // lacks the mod rows
+    BYTE liveKeys[32];
+    memcpy(liveKeys, g_keyBindingData, sizeof(liveKeys));
 
     memcpy(g_BioCardData, fileBuffer, sizeof(BioCardLayout));
     memcpy(g_padRemapSubTable3, fileBuffer + OFFSET_PAD_REMAP,
@@ -745,6 +752,18 @@ static void RestoreSaveBlock(const char* fileBuffer, int fileSize)
                 // file[0xA00] holds the saved sidewinder flag; the
                 // original loads it into a dead stack local.
                 memcpy(&g_bCostumeVariant, fileBuffer + OFFSET_COSTUME_VARIANT, 1);
+                // Mod: bit 1 of that byte = "wearing the alternate outfit"
+                // (MSF2_COSTUME_VARIANT), which lives only in the flag bank
+                // that game_start resets - RoomInit applies it on the load.
+                // (bit 7 set: bits 0-1 = variant, 0-2 incl. the Saturn outfit;
+                //  otherwise the first format, bit 1 = on, bit 0 = variant.)
+                if (g_bCostumeVariant & 0x80) {
+                    g_pendingCostumeOn = 1;
+                    g_bCostumeVariant &= 3;
+                } else {
+                    g_pendingCostumeOn = (g_bCostumeVariant & 2) ? 1 : 0;
+                    g_bCostumeVariant &= 1;
+                }
                 if (fileSize > 0xA02) {
                     memcpy(g_joyRemapBackupKey, fileBuffer + OFFSET_KEY_BACKUP, 0x80);
                     memcpy(g_joyRemapBackupJoy, fileBuffer + OFFSET_JOY_BACKUP, 0x80);
@@ -776,6 +795,12 @@ static void RestoreSaveBlock(const char* fileBuffer, int fileSize)
         // recognised and left as it was saved.
         InstallPadDefaultBindings();
     }
+
+    // Mod: put the player's own bindings back over whatever the save held.
+    memcpy(g_keyBindingData, liveKeys, sizeof(liveKeys));
+    memcpy(g_JoyRemapTbl[1], liveJoyRemap, sizeof(liveJoyRemap));
+    memcpy(g_JoyRemapTbl[0], liveKeyRemap, sizeof(liveKeyRemap));
+    InitInputKeyBindings();
 }
 
 // ============================================================================
@@ -1136,7 +1161,9 @@ void LoadSaveGameState(int mode, int flags, int useInkRibbon, int sfxBank, int c
             memcpy(fileBuffer + OFFSET_JOY_REMAP, g_JoyRemapTbl, 0x100);
             memcpy(fileBuffer + OFFSET_ROOM_BGM, g_roomBgmState, 0xE0);
             fileBuffer[OFFSET_SIDEWINDER] = (char)g_bPadConnected;
-            fileBuffer[OFFSET_COSTUME_VARIANT]   = (char)g_bCostumeVariant;
+            fileBuffer[OFFSET_COSTUME_VARIANT]   = (char)(((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0)
+                ? (0x80 | (g_bCostumeVariant & 3))    // mod: outfit on + variant (0-2)
+                : (g_bCostumeVariant & 1));
             memcpy(fileBuffer + OFFSET_JOY_BACKUP, g_joyRemapBackupJoy, 0x80);
             memcpy(fileBuffer + OFFSET_KEY_BACKUP, g_joyRemapBackupKey, 0x80);
             FileWrite(g_saveFileName, fileBuffer, SAVE_FILE_SIZE);

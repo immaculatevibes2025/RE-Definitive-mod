@@ -56,7 +56,10 @@ BOOL g_bFullScreen = FALSE;
 // as the original did blitting to a window without waiting for a vblank.
 // Blocking on a vblank instead makes the display, not the limiter, set the
 // tick rate - see the note on MarniDX::Present.
+DWORD g_dwAspectMode = 0;  // port-added: [Display] Aspect, 0 = MARNI_ASPECT_STRETCH (the port's behaviour so far)
 BOOL g_bVSync = FALSE;
+DWORD g_dwMsaa = 1;          // port-added: [Display] MSAA, 1 = off
+BOOL g_bCrtShader = FALSE;   // port-added: [Display] CRT
 // 0x004d642c
 int g_dwBitDepth = 16;
 // 0x004d6430
@@ -119,9 +122,9 @@ BYTE g_keyBindingData[32] = {
     0,           // [21]
     0,           // [22]
     0,           // [23]
-    0,           // [24]
-    0,           // [25]
-    0,           // [26]
+    'R',         // [24] → 0x52 reload (mod)
+    'E',         // [25] → 0x45 quick knife (mod)
+    'Q',         // [26] → 0x51 quick turn (mod)
     'A',         // [27] → 0x41 open options
     VK_CONTROL,  // [28] → 0x11 run/cancel
     VK_RETURN,   // [29] → 0x0d action/confirm
@@ -293,7 +296,7 @@ DWORD g_JoyRemapTbl[2][32] = {
         0x00000100, 0x00000800, 0x00000000, 0x00000000,
         0x00000000, 0x00000000, 0x00000000, 0x00000000,
         0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000900,
+        0x00040000, 0x00020000, 0x00010000, 0x00000900,   // [24] RELOAD, [25] QUICK KNIFE, [26] QUICK TURN (mod)
         0x00000040, 0x00000080, 0x00000080, 0x00000040
     },
     { // Player 2
@@ -2000,6 +2003,8 @@ int            g_DcDifficulty = DC_DIFFICULTY_STANDARD;
 bool           g_bPs1EndingCredits = false;
 bool           g_bPs1FmvSubtitles = false;
 bool           g_bSkipUnskippableFmv = false;
+bool           g_bModTicks = false;
+bool           g_bBattleAlwaysUnlocked = false;
 
 // ---------------------------------------------------------------------------
 // re1_rand / re1_srand (port-only)

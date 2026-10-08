@@ -82,6 +82,62 @@ static float DsVolumeToAmplitude(int millibels)
     return powf(10.0f, (float)millibels / 2000.0f);
 }
 
+// ============================================================================
+// Port-added: MUSIC / EFFECTS volume (title OPTIONS > SOUND OPTIONS, config.ini
+// [Sound] MusicVolume / EffectsVolume, 0-10). Every bank is an effect unless
+// SoundSystem.cpp marks it music when it loads it (the BGM channels, the
+// Battle Game tracks); the setting scales the bank's own volume, so the
+// game's fades and per-camera levels keep working on top of it.
+// ============================================================================
+static float         g_fMusicGain = 1.0f;
+static float         g_fSfxGain   = 1.0f;
+static float         g_fVoiceGain = 1.0f;  // cutscene dialogue (class 2)
+static unsigned char g_BankIsMusic[81];
+static int           g_BankLastVol[81];
+
+static float BankGain(int bank)
+{
+    if (bank <= 0 || bank > 80) return 1.0f;
+    if (g_BankIsMusic[bank] == 2) return g_fVoiceGain;
+    return g_BankIsMusic[bank] ? g_fMusicGain : g_fSfxGain;
+}
+
+static void BankApplyVolume(int bank)
+{
+    if (bank <= 0 || bank > 80 || g_BankVoices[bank] == NULL) return;
+    g_BankVoices[bank]->SetVolume(DsVolumeToAmplitude(g_BankLastVol[bank]) * BankGain(bank));
+}
+
+// 0..10 -> a gain on a gentle curve (10 = full, 5 = about -9 dB, 0 = silent).
+static float VolumeStepToGain(int step)
+{
+    if (step <= 0) return 0.0f;
+    if (step >= 10) return 1.0f;
+    const float t = (float)step / 10.0f;
+    return t * t;
+}
+
+void MarniSound_SetVolumes(int musicStep, int sfxStep)
+{
+    g_fMusicGain = VolumeStepToGain(musicStep);
+    g_fSfxGain = VolumeStepToGain(sfxStep);
+    for (int b = 1; b <= 80; b++) BankApplyVolume(b);
+}
+
+void MarniSound_SetVoiceVolume(int step)
+{
+    g_fVoiceGain = VolumeStepToGain(step);
+    for (int b = 1; b <= 80; b++) BankApplyVolume(b);
+}
+
+// isMusic: 0 = effects, 1 = music, 2 = voice.
+void MarniSound_SetBankMusic(int bank, int isMusic)
+{
+    if (bank <= 0 || bank > 80) return;
+    g_BankIsMusic[bank] = (unsigned char)(isMusic < 0 ? 0 : isMusic > 2 ? 2 : isMusic);
+    BankApplyVolume(bank);
+}
+
 // ------------------------------------------------------------------------
 // DirectSound constructor (0x0041f3b0)
 // ------------------------------------------------------------------------
@@ -364,8 +420,9 @@ void DirectSound::PlaySound(int bank, unsigned int slot)
             return;
         }
 
-        // Apply current volume
-        voice->SetVolume(DsVolumeToAmplitude(BANK_VOL(bank)));
+        // Apply current volume (port: times the MUSIC / EFFECTS setting)
+        g_BankLastVol[bank] = BANK_VOL(bank);
+        voice->SetVolume(DsVolumeToAmplitude(BANK_VOL(bank)) * BankGain(bank));
 
         BANK_STATUS(bank) = 1;
         return;
@@ -411,8 +468,9 @@ void DirectSound::SetVol(int bank, int vol)
 
     if (buf == DS_STUB_BUF) {
         IXAudio2SourceVoice* voice = g_BankVoices[bank];
+        g_BankLastVol[bank] = vol;
         if (voice != NULL) {
-            voice->SetVolume(DsVolumeToAmplitude(vol));
+            voice->SetVolume(DsVolumeToAmplitude(vol) * BankGain(bank));
         }
         BANK_VOL(bank) = vol;
         return;
@@ -516,6 +574,8 @@ int DirectSound::CreateSound(const char* wavName)
     BANK_VOL(bank) = 0;
     BANK_STATUS(bank) = 0;
     BANK_ACTIVE(bank) = 1;
+    g_BankIsMusic[bank] = 0;    // port: an effect until SoundSystem says music
+    g_BankLastVol[bank] = 0;
 
     // A PS1 file's loop region (AudioFile reports one only for files the
     // migrator marked; the PC tree's BGM_33.WAV has a smpl chunk the original

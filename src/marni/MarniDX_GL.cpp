@@ -33,9 +33,28 @@
 struct MarniDX::Impl {
     SDL_Window*   window = nullptr;
     SDL_GLContext ctx    = nullptr;
+    // Drawing dimensions: the content rectangle every projection maps over
+    // (= the drawable in MARNI_ASPECT_STRETCH). Port-added split: bbW/bbH are
+    // the real drawable size, cx/cy the content rectangle's top-left origin.
     int  width  = 0;
     int  height = 0;
+    int  bbW    = 0;
+    int  bbH    = 0;
+    int  cx     = 0;
+    int  cy     = 0;
+    int  aspectMode = MARNI_ASPECT_STRETCH;
     bool ready  = false;
+
+    void UpdateContentRect()
+    {
+        MarniComputeContentRect(aspectMode, bbW, bbH, &cx, &cy, &width, &height);
+    }
+
+    // GL's viewport origin is bottom-left; cy is measured from the top.
+    void ApplyViewport() const
+    {
+        glViewport(cx, bbH - cy - height, width, height);
+    }
 
     GLuint program = 0;
     GLuint vao     = 0;
@@ -326,8 +345,9 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
 
     int dw = 0, dh = 0;
     SDL_GL_GetDrawableSize(p->window, &dw, &dh);
-    p->width  = (dw > 0) ? dw : width;
-    p->height = (dh > 0) ? dh : height;
+    p->bbW = (dw > 0) ? dw : width;
+    p->bbH = (dh > 0) ? dh : height;
+    p->UpdateContentRect();
 
     if (!BuildPipeline(p)) return FALSE;
 
@@ -382,10 +402,39 @@ int MarniDX::ChangeDisplayMode(DWORD newWidth, DWORD newHeight, BOOL fullScreen)
 
     int dw = 0, dh = 0;
     SDL_GL_GetDrawableSize(p->window, &dw, &dh);
-    if (dw > 0) p->width = dw;
-    if (dh > 0) p->height = dh;
+    if (dw > 0) p->bbW = dw;
+    if (dh > 0) p->bbH = dh;
+    p->UpdateContentRect();
     return 1;
 }
+
+void MarniDX::SetAspectMode(int mode)
+{
+    Impl* p = m_pImpl;
+    if (p == nullptr) return;
+    if (mode < 0 || mode >= MARNI_ASPECT_COUNT) mode = MARNI_ASPECT_STRETCH;
+    p->aspectMode = mode;
+    if (p->bbW > 0 && p->bbH > 0) p->UpdateContentRect();
+}
+
+// Mod: 16:9 pan-and-scan is D3D11-only; the GL backend draws it as 4:3.
+void  MarniDX::SetViewportMode(int, float) {}
+float MarniDX::WideVisibleLines() const { return 240.0f; }
+
+int MarniDX::GetAspectMode() const
+{
+    return m_pImpl != nullptr ? m_pImpl->aspectMode : MARNI_ASPECT_STRETCH;
+}
+
+// Port-added (Video Options menu). MSAA and the CRT shader are implemented in
+// the D3D11 backend only; this backend keeps the settings so the menu and
+// config.ini round-trip, and draws as before.
+static int  s_glMsaa = 1;
+static BOOL s_glCrt  = FALSE;
+void MarniDX::SetMsaa(int samples)  { s_glMsaa = (samples == 2 || samples == 4 || samples == 8) ? samples : 1; }
+int  MarniDX::GetMsaa() const       { return 1; }
+void MarniDX::SetCrtShader(BOOL on) { s_glCrt = on ? TRUE : FALSE; }
+BOOL MarniDX::GetCrtShader() const  { return FALSE; }
 
 int MarniDX::HandleWindowMessage(HWND, UINT msg, WPARAM, LPARAM)
 {
@@ -394,8 +443,9 @@ int MarniDX::HandleWindowMessage(HWND, UINT msg, WPARAM, LPARAM)
     if (msg == WM_SIZE && m_pImpl != nullptr && m_pImpl->window != nullptr) {
         int dw = 0, dh = 0;
         SDL_GL_GetDrawableSize(m_pImpl->window, &dw, &dh);
-        if (dw > 0) m_pImpl->width = dw;
-        if (dh > 0) m_pImpl->height = dh;
+        if (dw > 0) m_pImpl->bbW = dw;
+        if (dh > 0) m_pImpl->bbH = dh;
+        m_pImpl->UpdateContentRect();
     }
     return 1;
 }
@@ -445,7 +495,9 @@ void MarniDX::Clear(float r, float g, float b, float a)
 {
     Impl* p = m_pImpl;
     if (p == nullptr || !p->ready) return;
-    glViewport(0, 0, p->width, p->height);
+    // Clear the WHOLE drawable (the bars of a non-stretch aspect mode too),
+    // then hand the content rectangle to every draw that follows.
+    glViewport(0, 0, p->bbW, p->bbH);
     glClearColor(r, g, b, a);
     // glClear is masked by the depth write mask. The 2D path leaves it GL_FALSE
     // (DrawBatch disables it for every non-depth draw), so without forcing it
@@ -456,6 +508,7 @@ void MarniDX::Clear(float r, float g, float b, float a)
     // fragments that happened to be no farther than last frame's surface.
     glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    p->ApplyViewport();
 }
 
 void MarniDX::Present()
@@ -699,29 +752,29 @@ BOOL MarniDX::CaptureBackbufferToRGBA(void** outPixels, DWORD* outWidth, DWORD* 
     Impl* p = m_pImpl;
     if (p == nullptr || !p->ready || outPixels == nullptr) return FALSE;
 
-    size_t size = (size_t)p->width * p->height * 4;
+    size_t size = (size_t)p->bbW * p->bbH * 4;
     unsigned char* buf = (unsigned char*)malloc(size);
     if (buf == nullptr) return FALSE;
 
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, p->width, p->height, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    glReadPixels(0, 0, p->bbW, p->bbH, GL_RGBA, GL_UNSIGNED_BYTE, buf);
 
     // GL reads bottom-up; the callers expect top-down.
-    unsigned char* row = (unsigned char*)malloc((size_t)p->width * 4);
+    unsigned char* row = (unsigned char*)malloc((size_t)p->bbW * 4);
     if (row != nullptr) {
-        for (int y = 0; y < p->height / 2; ++y) {
-            unsigned char* a = buf + (size_t)y * p->width * 4;
-            unsigned char* b = buf + (size_t)(p->height - 1 - y) * p->width * 4;
-            memcpy(row, a, (size_t)p->width * 4);
-            memcpy(a, b, (size_t)p->width * 4);
-            memcpy(b, row, (size_t)p->width * 4);
+        for (int y = 0; y < p->bbH / 2; ++y) {
+            unsigned char* a = buf + (size_t)y * p->bbW * 4;
+            unsigned char* b = buf + (size_t)(p->bbH - 1 - y) * p->bbW * 4;
+            memcpy(row, a, (size_t)p->bbW * 4);
+            memcpy(a, b, (size_t)p->bbW * 4);
+            memcpy(b, row, (size_t)p->bbW * 4);
         }
         free(row);
     }
 
     *outPixels = buf;
-    if (outWidth)  *outWidth  = (DWORD)p->width;
-    if (outHeight) *outHeight = (DWORD)p->height;
+    if (outWidth)  *outWidth  = (DWORD)p->bbW;
+    if (outHeight) *outHeight = (DWORD)p->bbH;
     return TRUE;
 }
 

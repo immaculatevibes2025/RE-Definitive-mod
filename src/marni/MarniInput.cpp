@@ -42,6 +42,7 @@ void CMarniDirectInput::UpdateKeyboardInputState(MasterInputState* pState)
     for (int i = 0; i < 32; i++) {
         // Through the platform layer (identical to GetAsyncKeyState on Windows;
         // this is the hook the scripted-input test path drives).
+        if (pState->keyMap[i] == 0) continue;   // Mod: unbound slot (see plat_key_state)
         SHORT keyState = (SHORT)plat_key_state(pState->keyMap[i]);
         if (keyState & 0x8000) {
             pState->keyboardCurr |= (1 << i);
@@ -90,6 +91,36 @@ void CMarniDirectInput::SetDefaultKeyMapping(BYTE* keyMap)
 // Main input update: polls keyboard + all connected joysticks.
 // Computes current/previous/new-press bitmasks for both keyboard and joysticks.
 // ============================================================================
+// ============================================================================
+// Mod: stuck-input guards for WinMM joysticks.
+//
+// The original read every axis against fixed 0x3000 / 0xC000 thresholds, which
+// assume a 0-0xFFFF range. A device reporting another range (many HID pads,
+// virtual pads, wheels, and any device that is enumerated but returns zeros)
+// reads as permanently LEFT + UP - the "character keeps walking, menus will
+// not open" bug. And a poll error (pad slept / unplugged) skipped the update
+// and left the last state latched for the rest of the session.
+//
+//   - thresholds come from the device's own caps range (a quarter in from
+//     each end, as the originals were for 0-0xFFFF);
+//   - an axis only counts once it has been seen resting in its centre zone,
+//     and a button only once it has been seen released, so a device that
+//     starts (or is stuck) deflected / held contributes nothing;
+//   - a poll error clears the device's state instead of freezing it.
+// ============================================================================
+struct JoyAxisRange { DWORD lo, hi; bool valid; };
+static JoyAxisRange s_joyX[MAX_JOYSTICKS], s_joyY[MAX_JOYSTICKS];
+static bool  s_joyXArmed[MAX_JOYSTICKS], s_joyYArmed[MAX_JOYSTICKS];
+static DWORD s_joyBtnArmed[MAX_JOYSTICKS];
+
+static void JoyAxisSetup(JoyAxisRange* r, UINT mn, UINT mx, bool present)
+{
+    r->valid = present && mx > mn && (mx - mn) >= 8;
+    const DWORD span = r->valid ? (DWORD)(mx - mn) : 0;
+    r->lo = (DWORD)mn + span * 3 / 16;     // 0x3000 of 0x10000
+    r->hi = (DWORD)mn + span * 12 / 16;    // 0xC000 of 0x10000
+}
+
 void CMarniDirectInput::UpdateAllInputStates(MasterInputState* pState)
 {
     // 0x0042057a: Update keyboard - writes keyboardCurr at +0x24
@@ -179,19 +210,40 @@ void CMarniDirectInput::UpdateAllInputStates(MasterInputState* pState)
         if (pErrorMsg != NULL) {
             // 0x00420633: Print error and skip this joystick
             printf("%s [%s]\n", pErrorMsg, "MarniSystem DirectInput Class");
+            // Mod: release everything rather than keep the last state held,
+            // and make the device prove itself centred/released again.
+            pJoy->prevPress = 0;
+            pJoy->currPress = 0;
+            pJoy->newPress  = 0;
+            s_joyXArmed[i] = s_joyYArmed[i] = false;
+            s_joyBtnArmed[i] = 0;
             continue;
         }
 
         // 0x0042063c-0x00420685: Build directional flags from axes
         DWORD dirFlags = 0;
 
-        // X axis: joystick right (>0xC000) or left (<0x3000)
-        if (pJoy->info.dwXpos > 0xC000) dirFlags |= 8;   // RIGHT bit
-        if (pJoy->info.dwXpos < 0x3000) dirFlags |= 4;   // LEFT bit
-
-        // Y axis: joystick down (>0xC000) or up (<0x3000)
-        if (pJoy->info.dwYpos > 0xC000) dirFlags |= 2;   // DOWN bit
-        if (pJoy->info.dwYpos < 0x3000) dirFlags |= 1;   // UP bit
+        // Mod: thresholds from the device's own range, and only once the axis
+        // has been seen centred (see the note above UpdateAllInputStates).
+        {
+            const DWORD x = pJoy->info.dwXpos, y = pJoy->info.dwYpos;
+            const JoyAxisRange& rx = s_joyX[i];
+            const JoyAxisRange& ry = s_joyY[i];
+            if (rx.valid) {
+                if (x >= rx.lo && x <= rx.hi) s_joyXArmed[i] = true;
+                if (s_joyXArmed[i]) {
+                    if (x > rx.hi) dirFlags |= 8;   // RIGHT bit
+                    if (x < rx.lo) dirFlags |= 4;   // LEFT bit
+                }
+            }
+            if (ry.valid) {
+                if (y >= ry.lo && y <= ry.hi) s_joyYArmed[i] = true;
+                if (s_joyYArmed[i]) {
+                    if (y > ry.hi) dirFlags |= 2;   // DOWN bit
+                    if (y < ry.lo) dirFlags |= 1;   // UP bit
+                }
+            }
+        }
 
         // 0x00420659-0x004206d5: POV hat to directional mapping
         // The POV hat is divided into 8 cardinal/diagonal zones:
@@ -218,7 +270,9 @@ void CMarniDirectInput::UpdateAllInputStates(MasterInputState* pState)
         }
 
         // 0x004206d7: Combine with button state (shifted left 8 bits)
-        dirFlags |= (pJoy->info.dwButtons << 8);
+        // Mod: a button counts only after it has been seen released once.
+        s_joyBtnArmed[i] |= ~pJoy->info.dwButtons;
+        dirFlags |= ((pJoy->info.dwButtons & s_joyBtnArmed[i]) << 8);
 
         // 0x004206da-0x004206e4: Compute press transitions
         // prevPress = last frame's currPress
@@ -299,6 +353,14 @@ void CMarniDirectInput::InitJoysticks(MasterInputState* pState)
         // zero - so the D-pad of every WinMM pad (a DualShock plugged straight
         // in reports its D-pad as a POV hat) produced no input at all.
         pJoy->povFlags = joyCaps.wCaps;
+
+        // Mod: the axis ranges the stuck-input guard thresholds against.
+        if (i < MAX_JOYSTICKS) {
+            JoyAxisSetup(&s_joyX[i], joyCaps.wXmin, joyCaps.wXmax, joyCaps.wNumAxes >= 1);
+            JoyAxisSetup(&s_joyY[i], joyCaps.wYmin, joyCaps.wYmax, joyCaps.wNumAxes >= 2);
+            s_joyXArmed[i] = s_joyYArmed[i] = false;
+            s_joyBtnArmed[i] = 0;
+        }
 
         // 0x004207dd-0x004207ed: Clear JOYINFOEX and set up for validation
         memset(&pJoy->info, 0, sizeof(JOYINFOEX));

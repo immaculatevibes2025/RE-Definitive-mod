@@ -113,6 +113,8 @@ extern int  is_entity_in_switch_zone(VECTOR* position, void* zoneData);   // 0x0
 // the original does too - so alias it rather than adding a second global.
 #define YAWN_TMP (*(int*)&g_tempVar)
 
+extern int g_battleActive;      // BattleGame.cpp (Saturn Battle Game mod)
+
 // ============================================================================
 // Static tables mined from .rdata
 // ============================================================================
@@ -1947,8 +1949,10 @@ void yawn_pick_action_normal(void)
             set_state_word(0x30101);
             eub(ENTITY, 0x17f) = 0;
         }
-        // Low health -> flee.
-        if (ew(ENTITY, 0x88) < 0xaf0) {
+        // Low health -> flee.  Mod: not in the Battle Game - there it fights
+        // on until its health runs out and plays the full death (state 3,
+        // yawn_die_run), as the second encounter in the main game does.
+        if (ew(ENTITY, 0x88) < 0xaf0 && !g_battleActive) {
             set_state_word(0x70101);
         }
     }
@@ -2073,6 +2077,14 @@ void yawn_init(void)
     FUN_004565f0(&g_svecScratch, (SVECTOR*)&ENTITY->pushVelocity, 1000, 1000);
 
     ew(ENTITY, 0x88) = 0x0bea;
+    // Mod: Battle Game. The first-encounter Yawn (type 13) is given 3050 HP
+    // but leaves at 2800 - it was never meant to be killed, and with the
+    // flee switched off it would take ~200 hits. Use the second encounter's
+    // health (type 18, below) so the fight ends in its death at a fair point.
+    if (g_battleActive && eub(ENTITY, 1) != 0x12) {
+        // (Raised to 450 - 300 went down too fast in play.)
+        ew(ENTITY, 0x88) = 450;
+    }
     if (eub(ENTITY, 1) == 0x12) {
         if (Flg_ck((int)&g_ScenarioFlags, SCENARIO_FLAG_SECOND_PLAYTHROUGH) == 0) {
             ew(ENTITY, 0x88) = 0x012c;
@@ -2187,6 +2199,19 @@ void yawn_init(void)
         if ((ENTITY->behavior_flags & 0x80) != 0) {
             eub(ENTITY, 0x84) = 4;
         }
+
+        // Mod: Saturn Battle Game (room 5, a copy of the attic). The state word
+        // above leaves +0x85 = 1, "an action is running, don't re-pick", and
+        // this branch starts no action that would clear it: idle hands over to
+        // move, and move never finishes. In the main game the attic's event
+        // scripts and the scripted entrance (behaviours 5/6) bring the snake
+        // out of that; the battle room has neither, so the snake slithered about
+        // forever without ever running yawn_select_behavior - never turning to
+        // the player, never biting, only shot flinches (yawn_damaged_run) ever
+        // released it. Hand it to the decision tree straight away.
+        if (g_battleActive && (ENTITY->behavior_flags & 0x80) == 0) {
+            eub(ENTITY, 0x85) = 0;
+        }
     }
 }
 
@@ -2279,6 +2304,12 @@ void yawn_update(void)
 {
     JointStruct* seg = NULL;
 
+    // Mod: Battle Game frame counter for the per-shot damage below.
+    static unsigned int s_btlYawnFrame = 0;
+    static unsigned int s_btlYawnLastHit = 0xFFFFFFFFu;
+    static unsigned char s_btlYawnPrevBleed[16];
+    if ((ENTITY->behavior_flags & 1) == 0) s_btlYawnFrame++;
+
     // Head only: run the state machine and tick the bite cooldown.
     if ((g_message_flags & 4) != 0 && (ENTITY->behavior_flags & 1) == 0) {
         switch (eub(ENTITY, 0x84)) {
@@ -2311,6 +2342,37 @@ void yawn_update(void)
             ENTITY->status_flags |= 0xc0;   // segment is up in the ceiling hole
         }
 
+        // Mod: Battle Game - one fixed hit per SHOT, by weapon, matching the
+        // Saturn's Battle Game (about 6 shotgun shells or 5 grenade rounds).
+        // The PC's own per-segment bleed (below) drains far more per blast
+        // because a spread hits several segments for several ticks each.
+        if (g_battleActive) {
+            const unsigned char bleed = (unsigned char)(eub(ENTITY, 0x8a) & 0x07);
+            const unsigned int si = (unsigned int)seg->index & 15;
+            const bool fresh = bleed != 0 && s_btlYawnPrevBleed[si] == 0;
+            s_btlYawnPrevBleed[si] = bleed;
+            if (fresh && s_btlYawnLastHit != s_btlYawnFrame) {
+                s_btlYawnLastHit = s_btlYawnFrame;   // one shot = one hit, however many segments
+                short dmg;
+                switch (g_playerEntity.equippedWeaponId) {
+                case 1:            dmg = 6;   break;   // knife
+                case 2:            dmg = 12;  break;   // handgun
+                case 3:            dmg = 50;  break;   // shotgun: 6 shells
+                case 4: case 5:    dmg = 75;  break;   // magnum: 4 rounds
+                case 6:            dmg = 8;   break;   // flamethrower (per burst)
+                case 7: case 8: case 9: dmg = 60; break; // grenade rounds: 5
+                default:           dmg = 300; break;   // rocket launcher
+                }
+                g_EnemiesList[0].health = (short)(g_EnemiesList[0].health - dmg);
+                if (g_EnemiesList[0].health < 0) {
+                    g_EnemiesList[0].state              = 3;
+                    g_EnemiesList[0].ignore_player_flag = 0;
+                    g_EnemiesList[0].action_behavior    = 0;
+                    g_EnemiesList[0].action_state       = 0;
+                }
+            }
+        }
+
         // A segment that was shot (low 3 bits of hit_state) bleeds and drains
         // the HEAD's health - this is how damage anywhere on the body counts.
         if ((eub(ENTITY, 0x8a) & 0x07) != 0) {
@@ -2323,7 +2385,9 @@ void yawn_update(void)
             Effect_CreateBillboard(0, 8, 0, &seg->world, &g_playerPosScratch, 0);
 
             // Reaction phase 0x40 / 0x50 = a heavy hit: 0x41 damage.
-            if ((eub(ENTITY, 0x8a) & 0x78) == 0x40 || (eub(ENTITY, 0x8a) & 0x78) == 0x50) {
+            // (Mod: not in the Battle Game - it uses the per-shot damage above.)
+            if (!g_battleActive &&
+                ((eub(ENTITY, 0x8a) & 0x78) == 0x40 || (eub(ENTITY, 0x8a) & 0x78) == 0x50)) {
                 g_EnemiesList[0].health = (short)(g_EnemiesList[0].health - 0x41);
                 g_EnemiesList[0].angle = (short)(g_EnemiesList[0].angle
                         + (short)turn_toward_target(player_pos_vec(), 0x10));
@@ -2334,7 +2398,7 @@ void yawn_update(void)
                     g_EnemiesList[0].action_state      = 0;
                 }
             }
-            if ((eub(ENTITY, 0x8a) & 7) == 0) {
+            if ((eub(ENTITY, 0x8a) & 7) == 0 && !g_battleActive) {
                 // Serum taken -> the snake only takes 5 per tick instead of 15.
                 if (Flg_ck((int)&g_ScenarioFlags, SCENARIO_FLAG_SECOND_PLAYTHROUGH) == 0) {
                     g_EnemiesList[0].health = (short)(g_EnemiesList[0].health - 0xf);

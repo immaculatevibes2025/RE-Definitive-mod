@@ -131,6 +131,8 @@
     <ClCompile Include="src\game\LogosScreen.cpp" />
     <ClCompile Include="src\game\DebugScreens.cpp" />
     <ClCompile Include="src\game\DebugMenu.cpp" />
+    <ClCompile Include="src\game\VideoMenu.cpp" />
+    <ClCompile Include="src\game\BattleGame.cpp" />
     <ClCompile Include="src\game\DebugSaveLoad.cpp" />
     <ClCompile Include="src\game\GameStart.cpp" />
     <ClCompile Include="src\game\GameLoop.cpp" />
@@ -204,6 +206,9 @@
     <ClCompile Include="src\game\SaveLoadScreen.cpp" />
     <ClCompile Include="src\game\GteMatrix.cpp" />
     <ClCompile Include="src\video\VideoPlayback.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\platform\win32\residentevil.rc" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Globals.h" />

@@ -21,6 +21,7 @@
 #include <cstdarg>
 #include "../DebugPrint.h"
 #include "../system/AssetPath.h"
+#include "BattleGame.h"       // battle_frame (Saturn Battle Game mod)
 
 // Forward declarations for functions only used within game_loop
 extern void FUN_00473f10(int* baseAddr, unsigned int bitIndex);
@@ -43,6 +44,8 @@ static int g_debugLoadScreenState = 0;
 // Main gameplay loop: entities, cameras, rooms, menus, combat.
 // Returns: 0 = game completed -> ending, 1 = died/quit -> title
 // ============================================================================
+extern int g_wideGameLoopStamp;   // Rendering.cpp
+
 int game_loop(void)
 {
     // 0x00480b30-0x00480b51: Wait for any pending menu/message to close
@@ -102,6 +105,9 @@ LAB_00480c33:
         do {
             // 0x00480c33-0x00480c4a: Per-frame random seed and reset
             g_RandSeed = (short)rand();
+            // Mod: 16:9 pan-and-scan only draws widescreen on frames the
+            // gameplay loop itself ran (Rendering.cpp).
+            g_wideGameLoopStamp = g_numFramesRendered;
             // Per-frame item-use flag bank: room logic re-arms it this frame
             g_itemUseFlags[0] = 0;
             g_itemUseFlags[1] = 0;
@@ -189,7 +195,7 @@ LAB_00480d7c:
                 // fires the script's event branch (fade-out, cutscene) the
                 // moment a bit is toggled, blacking the background.
                 // g_debugMenuOpen stays 0 while debug features are disabled.
-                if (g_debugMenuOpen == 0) {
+                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
                     run_command_functions((unsigned short*)g_RoomScdOpcodes);
                     room_events_check();
                     room_state_reset();
@@ -263,6 +269,14 @@ LAB_00480d7c:
                 } else {
                     g_debugMenuOpen = 0;
                 }
+
+                // Port-added: F2 opens the Video Options overlay
+                // (VideoMenu.cpp). It pauses exactly like the debug menu -
+                // every pause check below reads g_videoMenuOpen beside
+                // g_debugMenuOpen - and stays shut while that menu is up.
+                // Mod: the F2 overlay is retired - video settings now live
+                // in Option Mode's VIDEO tab.
+                g_videoMenuOpen = 0;
                 if (((g_playerEntity.isBeingAttackedFlag == 0) &&
                      ((g_message_flags & 0x100) != 0) &&
                      ((g_message_flags & 0x40) != 0) &&
@@ -291,7 +305,11 @@ LAB_00480e89:
                 // 0x00480e89-0x00480ebd: Update entities and player
                 // Debug menu open: pause entity/enemy updates while it is up.
                 // g_debugMenuOpen stays 0 while debug features are disabled.
-                if (g_debugMenuOpen == 0) {
+                // Mod: not during the Battle Game's ending shot either. Every
+                // enemy is dead by then, but a dead Tyrant keeps drawing its
+                // death debris (the blown-off joints, heart, claw trail) from
+                // its own update - the ending shows only the player.
+                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0 && g_battleEndingCam == 0) {
                     update_entities();
                 }
 
@@ -313,12 +331,17 @@ LAB_00480e89:
                 // queue only holds the menu box + text (drawn over the last
                 // presented frame) and nothing draws on top of the menu.
                 // g_debugMenuOpen stays 0 while debug features are disabled.
-                if (g_debugMenuOpen == 0) {
-                    DrawFadeSpr();
+                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
+                    // Mod: the Battle Game's ending shot draws the player and
+                    // nothing else - no fade sprites (shadows, blood pools), no
+                    // room objects, no enemies, no 2D effects, no room masks.
+                    if (g_battleEndingCam == 0) {
+                        DrawFadeSpr();
+                    }
                     update_room_objects();
 
                     // 0x00480ed4: Draw the room's own 3D objects (omodels + item models)
-                    if (g_dwRoomObjectRenderEnabled != 0) {
+                    if (g_dwRoomObjectRenderEnabled != 0 && g_battleEndingCam == 0) {
                         render_room_objects();
                     }
 
@@ -334,7 +357,8 @@ LAB_00480e89:
                             entCount = entCount - 1;
                             EntityComputeJointWorldMatrices(*(unsigned short*)&ENTITY->pad_ca);
                             EntityApplyLookAtRotation();
-                            if (g_dwEntityRenderEnabled != 0) {
+                            // Mod: the Battle Game's ending shows only the player.
+                            if (g_dwEntityRenderEnabled != 0 && g_battleEndingCam == 0) {
                                 render_entity(ENTITY);
                             }
                         }
@@ -345,13 +369,24 @@ LAB_00480e89:
                     ENTITY = (Entity*)&g_playerEntity;
                     EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
                     EntityApplyLookAtRotation();
+                    {
+                        // Mod: a Tick's severed head, placed after the player's
+                        // own pose so nothing overwrites it (Hunter.cpp).
+                        extern void tick_head_apply(void);
+                        tick_head_apply();
+                    }
                     if (g_dwEntityRenderEnabled != 0) {
                         render_entity((Entity*)&g_playerEntity);
                     }
 
                     // 0x00480f6e-0x00480f70: 2D effects and room sprites
-                    update_2d_effects();
-                    DrawRoomSpr();
+                    if (g_battleEndingCam == 0) {
+                        update_2d_effects();
+                    }
+                    // Mod: no room masks over the Battle Game's black ending.
+                    if (g_battleEndingCam == 0) {
+                        DrawRoomSpr();
+                    }
                 }
 
                 // 0x00480f70-0x00480f90: Debug save menu
@@ -363,6 +398,12 @@ LAB_00480e89:
                         g_debugSaveMenuFlag = 0;
                         DebugSaveMenu();
                     }
+                }
+
+                // Mod: Saturn Battle Game - timer, HUD, room clear / next room,
+                // the results at the end. Paused with the rest of the game.
+                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
+                    battle_frame();
                 }
 
                 // 0x00480f90-0x00480fae: Check player death

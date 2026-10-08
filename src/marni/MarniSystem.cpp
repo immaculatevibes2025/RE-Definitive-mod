@@ -130,6 +130,11 @@ static CMarniDirect3D* MarniDirect3D_Construct(CMarniDirect3D* pThis,
     pThis->m_pDX = MarniDX_Create();
     if (pThis->m_pDX) {
         int actualW, actualH;
+        // Port-added: config.ini [Display] Aspect, set before Create so the
+        // first frame is already laid out (Create reports the content size).
+        pThis->m_pDX->SetAspectMode((int)g_dwAspectMode);
+        pThis->m_pDX->SetMsaa((int)g_dwMsaa);
+        pThis->m_pDX->SetCrtShader(g_bCrtShader);
         if (pThis->m_pDX->Create(hWnd, (int)pThis->m_width,
                                  (int)pThis->m_height,
                                  pThis->m_isFullScreen,
@@ -823,6 +828,19 @@ void MarniGetRenderScale(float* outScaleX, float* outScaleY)
     if (outScaleY) *outScaleY = (float)bh / (float)lh;
 }
 
+// Port-added (Video Options menu). Same read-back as the WM_SIZE case of
+// VTable_HandleWindowMessage, so m_width/m_height follow the content size.
+void MarniSetAspectMode(int mode)
+{
+    CMarniDirect3D* pD3D = (CMarniDirect3D*)g_pMarniDirect3D;
+    if (!pD3D || !pD3D->m_pDX) return;
+    pD3D->m_pDX->SetAspectMode(mode);
+    DWORD nw = 0, nh = 0;
+    pD3D->m_pDX->GetBackBufferSize(&nw, &nh);
+    if (nw > 0) pD3D->m_width  = nw;
+    if (nh > 0) pD3D->m_height = nh;
+}
+
 BOOL MarniCreateTexture(int width, int height, int bpp, const void* pixelData,
                         MarniHandle* outTex)
 {
@@ -832,4 +850,19 @@ BOOL MarniCreateTexture(int width, int height, int bpp, const void* pixelData,
     *outTex = pD3D->m_pDX->CreateTexture(width, height, bpp, pixelData,
                                          NULL, NULL);
     return (*outTex != MARNI_NULL_HANDLE);
+}
+
+// Port-added (Video Options menu).
+void MarniSetMsaa(int samples)
+{
+    CMarniDirect3D* pD3D = (CMarniDirect3D*)g_pMarniDirect3D;
+    if (!pD3D || !pD3D->m_pDX) return;
+    pD3D->m_pDX->SetMsaa(samples);
+}
+
+void MarniSetCrtShader(BOOL on)
+{
+    CMarniDirect3D* pD3D = (CMarniDirect3D*)g_pMarniDirect3D;
+    if (!pD3D || !pD3D->m_pDX) return;
+    pD3D->m_pDX->SetCrtShader(on);
 }

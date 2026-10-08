@@ -77,6 +77,10 @@ static void DebugRestoreSaveBlock(const char* fileBuffer, int fileSize)
 {
     DWORD liveJoyRemap[32];
     memcpy(liveJoyRemap, g_JoyRemapTbl[1], sizeof(liveJoyRemap));
+    DWORD liveKeyRemap[32];     // Mod: the keyboard table too - a save's copy
+    memcpy(liveKeyRemap, g_JoyRemapTbl[0], sizeof(liveKeyRemap));   // lacks the mod rows
+    BYTE liveKeys[32];                       // Mod: controls are global
+    memcpy(liveKeys, g_keyBindingData, sizeof(liveKeys));
 
     memcpy(g_BioCardData, fileBuffer, sizeof(BioCardLayout));
     memcpy(g_padRemapSubTable3, fileBuffer + DBG_OFFSET_PAD_REMAP,
@@ -92,6 +96,16 @@ static void DebugRestoreSaveBlock(const char* fileBuffer, int fileSize)
                 // file[0xA00] holds the saved sidewinder flag; the original
                 // loads it into a dead stack local.
                 memcpy(&g_bCostumeVariant, fileBuffer + DBG_OFFSET_COSTUME, 1);
+                {
+                    extern int g_pendingCostumeOn;   // SaveLoadScreen.cpp
+                    if (g_bCostumeVariant & 0x80) {
+                        g_pendingCostumeOn = 1;
+                        g_bCostumeVariant &= 3;
+                    } else {
+                        g_pendingCostumeOn = (g_bCostumeVariant & 2) ? 1 : 0;
+                        g_bCostumeVariant &= 1;
+                    }
+                }
                 if (fileSize > 0xA02) {
                     memcpy(g_joyRemapBackupKey,
                            fileBuffer + DBG_OFFSET_KEY_BACKUP, 0x80);
@@ -118,6 +132,12 @@ static void DebugRestoreSaveBlock(const char* fileBuffer, int fileSize)
 
         InstallPadDefaultBindings();
     }
+
+    // Mod: put the player's own bindings back over whatever the save held.
+    memcpy(g_keyBindingData, liveKeys, sizeof(liveKeys));
+    memcpy(g_JoyRemapTbl[1], liveJoyRemap, sizeof(liveJoyRemap));
+    memcpy(g_JoyRemapTbl[0], liveKeyRemap, sizeof(liveKeyRemap));
+    InitInputKeyBindings();
 }
 
 // Assemble the full 0xA82 save file image. Mirror of STATE_PERFORM_SAVE's
@@ -137,7 +157,9 @@ static void DebugAssembleSaveFile(char* fileBuffer)
     memcpy(fileBuffer + DBG_OFFSET_JOY_REMAP, g_JoyRemapTbl, 0x100);
     memcpy(fileBuffer + DBG_OFFSET_ROOM_BGM, g_roomBgmState, 0xE0);
     fileBuffer[DBG_OFFSET_SIDEWINDER] = (char)g_bPadConnected;
-    fileBuffer[DBG_OFFSET_COSTUME]    = (char)g_bCostumeVariant;
+    fileBuffer[DBG_OFFSET_COSTUME]    = (char)(((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0)
+        ? (0x80 | (g_bCostumeVariant & 3))    // mod: outfit on + variant (0-2)
+        : (g_bCostumeVariant & 1));
     memcpy(fileBuffer + DBG_OFFSET_JOY_BACKUP, g_joyRemapBackupJoy, 0x80);
     memcpy(fileBuffer + DBG_OFFSET_KEY_BACKUP, g_joyRemapBackupKey, 0x80);
 }

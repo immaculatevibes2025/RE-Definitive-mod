@@ -156,6 +156,16 @@ void  MarniDrawTrianglesPersp(const float* verts, int triCount, MarniHandle tex,
 // logical video resolution while the swapchain keeps the window size).
 void  MarniGetRenderScale(float* outScaleX, float* outScaleY);
 
+// Port-added (Video Options menu): set the aspect mode (MARNI_ASPECT_*) of
+// the running renderer and refresh the cached CMarniDirect3D size, exactly as
+// the WM_SIZE path does. g_dwAspectMode is the caller's to persist.
+void  MarniSetAspectMode(int mode);
+
+// Port-added (Video Options menu): MSAA sample count (1/2/4/8) and the CRT
+// shader on the running renderer. g_dwMsaa / g_bCrtShader are the caller's.
+void  MarniSetMsaa(int samples);
+void  MarniSetCrtShader(BOOL on);
+
 // Create a texture from raw host pixels; returns an opaque MarniHandle.
 // bpp may be 4, 8, 16, 24, or 32. On success the handle is written to
 // *outTex (if non-NULL) and the function returns TRUE, otherwise FALSE.

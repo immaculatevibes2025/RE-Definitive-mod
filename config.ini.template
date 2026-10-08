@@ -5,22 +5,39 @@
 ; are rewritten by the game on exit. Everything else is yours to edit and is
 ; never touched. Comments are kept.
 ;
-; The [Input] bindings are platform-specific (Windows virtual-key codes vs SDL
-; scancodes for Linux), so that section is absent here: the build's compiled
-; defaults apply until the first exit writes them out.
+; The [Input] bindings are Windows virtual-key codes (the default layout).
 
 [Display]
 ; 0 = windowed, 1 = fullscreen
-FullScreen=0
+FullScreen=1
 ; Resolution width
 Width=640
 ; Resolution height
 Height=480
 ; Bits per pixel (16 or 32)
-BitDepth=16
+BitDepth=32
 ; Wait for vblank on present. 0 = off (default, and what the original did
 ; in a window): the engine paces itself to 33 ms per tick in software.
 VSync=0
+; How the 4:3 picture fills the screen: 0 = stretch to fill, 1 = 4:3 with
+; black bars, 2 = 4:3 at a whole-number scale. Also in the F2 Video Options
+; menu.
+Aspect=1
+; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples. Also in the F2 Video
+; Options menu.
+MSAA=1
+; 1 = CRT shader (CRT-Royale style scanlines, phosphor mask, curvature). Also
+; in the F2 Video Options menu.
+CRT=0
+; 1 = interpolated 60fps (blends movement between game ticks).
+Interpolate60=0
+
+[Sound]
+; Music and sound-effect volume, 0 (off) to 10 (full). Also in the title
+; screen's OPTIONS > SOUND OPTIONS.
+MusicVolume=10
+EffectsVolume=10
+VoiceVolume=10
 
 [Assets]
 ; Folder that holds the USA/ and JPN/ data trees. Relative paths are resolved
@@ -48,7 +65,34 @@ Ps1EndingCredits=0
 ; staff rolls, DMF and DME) be skipped with the usual buttons like any other FMV.
 SkipUnskippableFmv=0
 
+[Mods]
+; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard tunnels on
+; (STAGE3), as on the Saturn; the mansion Hunters stay. Loads enemy/em1016.emd
+; and em1116.emd (tools/saturn/tick2pc.py), the Tick's close-range
+; decapitation and sounds (sound/TK_*.wav from
+; tools/saturn/ticksnd.py). Anything missing falls back to the Hunter.
+; OG mode only.
+Ticks=0
+QuickKnife=0
+QuickTurn=0
+Reload=0
+
+[BattleGame]
+; The Sega Saturn Battle Game (title menu, BATTLE GAME). Like the Saturn, it
+; appears once the game has been finished ([Player] ClearCount > 0).
+; 1 = always offer it. Needs data/t_battle.tim and battle/ROOM80x0.RDT
+; (tools/saturn/battle_title.py, battle2pc.py). OG mode, USA assets.
+AlwaysUnlocked=0
+
 [Debug]
 ; Master switch for the port-added debug features: F1 debug menu, F6
 ; texture viewer, F8 collision overlay. 0 = off, 1 = on.
 EnableDebug=0
+
+[Input]
+; Input debugging: InputLog=1 writes input_log.txt; Gamepad=0 ignores controllers.
+InputLog=0
+Gamepad=1
+KeyDef=5753414400100000000002010009000000000000000000005251451B110D201B
+SideDef=0010000000400000008000000020000000000000000000000000000000000000800000000000000040000000000800000000000000000000000000000800000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+PadDef=0010000000400000008000000020000000100000004000000080000000200000800000000000040040000000000000000000010000000000000900000008000000000000000000000000020008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000

@@ -1,5 +1,22 @@
 # Resident Evil 1 for PC Decompilation
 
+> **About this fork**
+>
+> This is a modded fork of [ecruells/resident-evil-pc-decomp](https://github.com/ecruells/resident-evil-pc-decomp),
+> the Resident Evil (1997 PC) decompilation by **ecruells** and contributors. All of the
+> decompilation, engine and port work is theirs; this fork only adds the changes listed
+> below on top of it, under the same GNU GPL v3 license.
+>
+> **Added in this fork** (everything is off by default and set in `config.ini` or the in-game Option Mode):
+> - Sega Saturn content: the Battle Game, Saturn Ticks (in place of the cave Hunters),
+>   Saturn-style Tick grab and decapitation, Saturn Tick sounds (`tools/saturn/`)
+> - RE 1.5 Man Spider option for the Battle Game boss (`tools/saturn/manspider2pc.py`)
+> - Video options: interpolated 60fps, 16:9 widescreen (pan-and-scan), CRT shader, MSAA
+> - Gameplay options: Quick Knife, Quick Turn, Reload button
+>
+> No game data is included. You need your own copy of Resident Evil for PC (and, for the
+> Saturn extras, your own Sega Saturn disc) - see the Legal notice below.
+
 ## Introduction
 
 This is a decompilation Resident Evil 1 for PC released in 1997. The original game code, reverse-engineered from the Ghidra decompilation of the 1997 executable, is rebuilt on a modern rendering layer, for **two platforms**:

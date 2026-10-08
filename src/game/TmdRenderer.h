@@ -105,3 +105,10 @@ float TmdViewZToNdc(float vz);
 
 // Drop every queued object without drawing (frame reset).
 void  TmdQueue_Reset(void);
+
+// Interpolated 60fps mode ([Display] Interpolate60). When set, FlushTmdObjects
+// leaves the queue intact so the same tick can be drawn a second time.
+extern bool g_tmdKeepQueue;
+// Returns the transform to draw objData with: `cur` normally, or a blend of the
+// previous tick's transform and `cur` (written to `tmp`) on the in-between frame.
+const float* Interp60_Matrix(const unsigned char* objData, const float* cur, float* tmp);

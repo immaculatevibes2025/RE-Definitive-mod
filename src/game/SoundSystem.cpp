@@ -12,6 +12,10 @@
 #include <cstdio>
 #include <cstring>
 #include "../system/AssetPath.h"
+#include "BattleGame.h"          // g_battleActive (Saturn Battle Game mod)
+
+// MarniSound.cpp: the MUSIC / EFFECTS volume setting.
+extern void MarniSound_SetBankMusic(int bank, int isMusic);
 
 // ============================================================================
 // sounds_reset (0x0047eb70)
@@ -732,6 +736,7 @@ static void bgm_load_and_start(unsigned char bgmState)
         findAndOpenFile(path);
 
         int bank = loadSndBankFromWav(path);
+        MarniSound_SetBankMusic(bank, 1);   // port: BGM channels are MUSIC
         ch->handle = bank;
         if (bank == 0) {
             dbg_printf("[bgm] stage %u room %u ch%d group %02X '%s' FAILED TO LOAD\n",
@@ -793,8 +798,222 @@ static void bgm_start_secondary_slots(void)
 // Reads the target BGM state from g_RoomBgmStatePtr[g_roomId], compares with
 // the current g_BGM_STATE, and fades/starts BGM tracks as needed.
 // ============================================================================
+// ============================================================================
+// Mod: Saturn Battle Game music.
+//
+// The Saturn plays one track through the whole Battle Game: song 0 of
+// SND/BATTLE.CDP, rendered to sound\battle.wav by tools/saturn/satbgm.py. The
+// battle rooms are copies of main-game rooms, so their own BGM states would
+// pick the mansion / lab tracks; in the mode this replaces them all with the
+// one looping track in the fight rooms, kept running from one fight room to
+// the next; the safe rooms (1, 6, 11) play their own room music. Without the file the rooms keep their normal music.
+// ============================================================================
+static int s_battleBgmBank = 0;
+static const char* s_battleBgmTrack = "";   // which fight track is loaded
+static int s_battleSafeBgm = 0;     // the safe-room track is loaded
+
+// The safe-room track. Rooms 1 and 6 are copies of the main hall, which has no
+// music of its own (its BGM state is 0xFF), so all three safe rooms play the
+// track of room 11's base, ROOM30E0 - a real save room - looked up through the
+// same tables bgm_load_and_start uses.
+#define BATTLE_SAFE_BGM_STAGE 2
+#define BATTLE_SAFE_BGM_ROOM  0x0E
+
+static void battle_safe_bgm_start(void)
+{
+    const unsigned char state =
+        g_roomBgmState[BATTLE_SAFE_BGM_STAGE * 32 + BATTLE_SAFE_BGM_ROOM];
+    if (state == 0xFF || g_bgmDataTable == NULL) {
+        return;
+    }
+    const unsigned int idx =
+        (BATTLE_SAFE_BGM_STAGE * 0x20 + BATTLE_SAFE_BGM_ROOM) * 4 + (state & 7);
+    if (idx >= sizeof(g_BgmRoomData)) {
+        return;
+    }
+    const unsigned char group = g_bgmDataTable[idx];
+    if (group == 0xFF) {
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        SndBankSlot* ch = &g_SndBank[i];
+        ch->handle = 0; ch->field_04 = 0; ch->slot = 0; ch->paused = 0;
+        const char* filename = g_BgmNameTable[group][i];
+        if (filename == NULL || (state & (8 << i)) == 0) {
+            continue;
+        }
+        char path[260];
+        sprintf(path, GAME_DATA_ROOT "sound\\%s.wav", filename);
+        findAndOpenFile(path);
+        const int bank = loadSndBankFromWav(path);
+        MarniSound_SetBankMusic(bank, 1);   // port: a MUSIC track
+        if (bank == 0) {
+            continue;
+        }
+        ch->handle = bank;
+        ch->slot = (signed char)g_BgmLoopTable[group][i];
+        pan_set(bank, 0);
+        set_volume(bank, g_bgmDefaultVolume);
+        SetSndSlot(bank, ch->slot);
+        dbg_printf("[bgm] Battle Game safe room: ch%d '%s'\n", i, filename);
+    }
+    g_BGM_STATE = state;
+    s_battleSafeBgm = 1;
+}
+
+static int battle_bgm_update(void)
+{
+    if (!g_battleActive) {
+        s_battleBgmBank = 0;            // a normal room's fade-out frees it
+        s_battleSafeBgm = 0;
+        return 0;
+    }
+    if (battle_in_safe_room()) {
+        // Safe rooms play the save-room track (battle_safe_bgm_start).
+        if (s_battleSafeBgm) {
+            return 1;
+        }
+        if ((unsigned char)g_BGM_STATE != 0xFF || g_SndBank[0].handle != 0 ||
+            g_SndBank[1].handle != 0 || g_SndBank[2].handle != 0) {
+            bgm_fade_out_all();
+        }
+        s_battleBgmBank = 0;
+        g_BGM_STATE = 0xFF;
+        battle_safe_bgm_start();
+        return 1;
+    }
+    if (s_battleSafeBgm) {
+        // Leaving a safe room: the battle track below replaces it.
+        bgm_fade_out_all();
+        s_battleSafeBgm = 0;
+        g_BGM_STATE = 0xFF;
+    }
+    // Rooms 5, 8 and 10 (Yawn, Plant 42, Black Tiger) play Yawn's boss
+    // music, the attic's own track (BGM group 6, Bgm_08); room 15 the Tyrant
+    // battle, the lab Tyrant's own track (BGM group 52, Bgm_24 - looped whole,
+    // build-up included, as the PC release plays it); the other fight rooms
+    // the Saturn's battle track.
+    const char* track = battle_in_tyrant_room() ? "Bgm_24"
+                      : battle_in_boss_room()   ? "Bgm_08"
+                      : "battle";
+    if (s_battleBgmBank != 0 && g_SndBank[0].handle == s_battleBgmBank &&
+        _stricmp(s_battleBgmTrack, track) == 0) {
+        return 1;                       // already playing - keep it going
+    }
+    char rel[64];
+    sprintf(rel, "sound/%s.wav", track);
+    if (!mod_asset_exists(rel)) {
+        return 0;
+    }
+
+    if ((unsigned char)g_BGM_STATE != 0xFF || g_SndBank[0].handle != 0 ||
+        g_SndBank[1].handle != 0 || g_SndBank[2].handle != 0) {
+        bgm_fade_out_all();
+    }
+
+    char path[260];
+    sprintf(path, GAME_DATA_ROOT "sound\\%s.wav", track);
+    findAndOpenFile(path);
+    const int bank = loadSndBankFromWav(path);
+    MarniSound_SetBankMusic(bank, 1);   // port: a MUSIC track
+    if (bank == 0) {
+        dbg_printf("[bgm] %s.wav FAILED TO LOAD\n", track);
+        s_battleBgmBank = 0;
+        g_BGM_STATE = 0xFF;
+        return 0;
+    }
+    s_battleBgmTrack = track;
+    SndBankSlot* ch = &g_SndBank[0];
+    ch->handle   = bank;
+    ch->field_04 = 0;
+    ch->slot     = 1;                   // loop
+    ch->paused   = 0;
+    pan_set(bank, 0);
+    set_volume(bank, g_bgmDefaultVolume);
+    SetSndSlot(bank, ch->slot);
+
+    s_battleBgmBank = bank;
+    g_BGM_STATE = 0x08;                 // channel 0 playing
+    dbg_printf("[bgm] Battle Game music started\n");
+    return 1;
+}
+
+// The results screen's jingle: song 1 of SND/BATTLE.CDP (sound\\battle_rank.wav,
+// satbgm.py), played once. battle_bgm_stop (the title screen) frees it.
+void battle_jingle_play(void)
+{
+    battle_bgm_stop();
+    if (!mod_asset_exists("sound/battle_rank.wav")) {
+        return;
+    }
+    char path[260];
+    sprintf(path, GAME_DATA_ROOT "sound\\battle_rank.wav");
+    findAndOpenFile(path);
+    const int bank = loadSndBankFromWav(path);
+    MarniSound_SetBankMusic(bank, 1);   // port: a MUSIC track
+    if (bank == 0) {
+        dbg_printf("[bgm] battle_rank.wav FAILED TO LOAD\n");
+        return;
+    }
+    SndBankSlot* ch = &g_SndBank[0];
+    ch->handle   = bank;
+    ch->field_04 = 0;
+    ch->slot     = 0;                   // once
+    ch->paused   = 0;
+    pan_set(bank, 0);
+    set_volume(bank, g_bgmDefaultVolume);
+    SetSndSlot(bank, 0);
+    s_battleBgmBank = bank;
+    g_BGM_STATE = 0x08;
+}
+
+// The ranking page's music: the credits track, taken from the staff roll
+// movie (MOVIE/stfc_r - the audio as sound\\battle_credits.wav), looped.
+void battle_credits_play(void)
+{
+    battle_bgm_stop();
+    if (!mod_asset_exists("sound/battle_credits.wav")) {
+        return;
+    }
+    char path[260];
+    sprintf(path, GAME_DATA_ROOT "sound\\battle_credits.wav");
+    findAndOpenFile(path);
+    const int bank = loadSndBankFromWav(path);
+    MarniSound_SetBankMusic(bank, 1);   // port: a MUSIC track
+    if (bank == 0) {
+        dbg_printf("[bgm] battle_credits.wav FAILED TO LOAD\n");
+        return;
+    }
+    SndBankSlot* ch = &g_SndBank[0];
+    ch->handle   = bank;
+    ch->field_04 = 0;
+    ch->slot     = 1;                   // loop
+    ch->paused   = 0;
+    pan_set(bank, 0);
+    set_volume(bank, g_bgmDefaultVolume);
+    SetSndSlot(bank, 1);
+    s_battleBgmBank = bank;
+    g_BGM_STATE = 0x08;
+}
+
+// Called when a Battle Game run ends (results screen) and at the title.
+void battle_bgm_stop(void)
+{
+    if (s_battleBgmBank != 0 || s_battleSafeBgm) {
+        bgm_fade_out_all();
+        s_battleBgmBank = 0;
+        s_battleSafeBgm = 0;
+        g_BGM_STATE = 0xFF;
+    }
+}
+
 void update_room_bgm(void)
 {
+    if (battle_bgm_update()) {
+        g_main_state_flags2 &= ~MSF2_SND_BUSY;
+        return;
+    }
+
     g_targetBgmState = g_RoomBgmStatePtr[g_roomId];
     g_prevBgmState = (unsigned char)g_BGM_STATE;
 
@@ -1234,6 +1453,7 @@ static void voice_load_and_play(unsigned int id)
     }
 
     g_BgmSoundBank = loadSndBankFromWav(path);
+    MarniSound_SetBankMusic(g_BgmSoundBank, 2);   // port: a VOICE line
     if (g_BgmSoundBank != 0) {
         pan_set(g_BgmSoundBank, 0);
         int volume = g_voiceVolume;
@@ -1405,6 +1625,23 @@ static void emsnd_load_slot(int slot, const char* filename)
     if (filename == NULL) return;
 
     char path[260];
+
+    // Mod: Saturn Ticks ([Mods] Ticks, STAGE3 only - see mod_ticks_active).
+    // The Hunter's eight slots are HU_* in the mansion and He_* underground; the Saturn plays the Tick's set in the
+    // same slots (SE309A.CDP), extracted as sound\TK_<suffix>.wav by
+    // tools/saturn/ticksnd.py. A missing TK file keeps the original sound.
+    char tickName[32];
+    if (mod_ticks_active() &&
+        (strncmp(filename, "HU_", 3) == 0 || strncmp(filename, "He_", 3) == 0)) {
+        _snprintf(tickName, sizeof(tickName), "TK_%s", filename + 3);
+        tickName[sizeof(tickName) - 1] = '\0';
+        _snprintf(path, sizeof(path), GAME_DATA_ROOT "sound\\%s.wav", tickName);
+        path[sizeof(path) - 1] = '\0';
+        if (findAndOpenFile(path) != 0) {
+            filename = tickName;
+        }
+    }
+
     _snprintf(path, sizeof(path), GAME_DATA_ROOT "sound\\%s.wav", filename);
     path[sizeof(path) - 1] = '\0';
     findAndOpenFile(path);
@@ -1434,6 +1671,71 @@ static void emsnd_load_slot(int slot, const char* filename)
 // is complete now; the guard and the snprintf are here so a future short table
 // reports itself instead of corrupting the stack.
 // ============================================================================
+// ============================================================================
+// Mod: the Battle Game Man Spider's own sounds, decoded from the RE 1.5 room
+// bank (ROOM5040.RDT bank 1) to sound\MS_<id>.wav, indexed by the 1.5 sound
+// id his AI passes to its play call (0x800453d0). Loaded per room while he is
+// active; played positioned at the current entity like Snd_em.
+// ============================================================================
+extern int battle_man_spider_active(void);
+static int s_msSnd[16];
+
+static void ms_snd_load(void)
+{
+    for (int i = 0; i < 16; i++) {
+        if (s_msSnd[i] != 0) destroySndBank(s_msSnd[i]);
+        s_msSnd[i] = 0;
+    }
+    if (!battle_man_spider_active()) return;
+    for (int i = 0; i < 16; i++) {
+        char path[260];
+        _snprintf(path, sizeof(path), GAME_DATA_ROOT "sound\\MS_%02d.wav", i);
+        path[sizeof(path) - 1] = '\0';
+        if (findAndOpenFile(path) == 0) continue;
+        s_msSnd[i] = loadSndBankFromWav(path);
+    }
+}
+
+void ms_snd_play(int id)
+{
+    if (id < 0 || id >= 16 || s_msSnd[id] == 0) return;
+    Calc3DSndPan((VECTOR*)ENTITY->scaMatrixData.localMatrix.t);
+    pan_set(s_msSnd[id], (g_snd_pan_right - g_snd_pan_left) * 0x4E);
+    SetSndSlot(s_msSnd[id], 0);
+}
+
+// Mod: the Saturn Tick's kill sounds, each in its own bank, played straight
+// from the grab code (matched against Saturn footage of the kill):
+//   0 TK_att.wav   - the attack cry as it grabs (bank voice 7)
+//   1 TK_smash.wav - the follow-up roar (voice 2)
+//   2 TK_cry.wav   - the scream as it kills (voice 0; not in any PC slot,
+//                    extracted by tools/saturn/ticksnd.py)
+//   3 TK_roar.wav  - the double roar after the kill, taken from Saturn
+//                    footage (not found in the Tick's sound banks)
+static int s_tickCry[4] = { 0, 0, 0, 0 };
+void tick_cry_play(int which)
+{
+    static const char* const kName[4] = { "TK_att", "TK_smash", "TK_cry", "TK_roar" };
+    if (which < 0 || which > 3) return;
+    if (s_tickCry[which] == 0) {
+        char path[260];
+        _snprintf(path, sizeof(path), GAME_DATA_ROOT "sound\\%s.wav", kName[which]);
+        path[sizeof(path) - 1] = '\0';
+        if (findAndOpenFile(path) == 0) return;
+        s_tickCry[which] = loadSndBankFromWav(path);
+        char m[96];
+        sprintf(m, "tick cry load: %s -> bank %d", path, s_tickCry[which]);
+        crashlog_mark(m);
+        if (s_tickCry[which] == 0) return;
+    }
+    Calc3DSndPan((VECTOR*)ENTITY->scaMatrixData.localMatrix.t);
+    pan_set(s_tickCry[which], (g_snd_pan_right - g_snd_pan_left) * 0x4E);
+    SetSndSlot(s_tickCry[which], 0);
+    char m[96];
+    sprintf(m, "tick cry play %d: bank=%d", which, s_tickCry[which]);
+    crashlog_mark(m);
+}
+
 void Room_LoadEnemySoundBanks(void) {
     int iVar6 = 0;
     int* piVar7 = g_emSndBanks;
@@ -1505,6 +1807,7 @@ void Room_LoadEnemySoundBanks(void) {
                        arrangeLoaded ? "arrange" : "base file", applied);
         }
     }
+    ms_snd_load();   // Mod: Battle Game Man Spider (RE 1.5 sounds)
 }
 
 // (0x0047f870) - 3-param play_sfx overload (mode parameter)

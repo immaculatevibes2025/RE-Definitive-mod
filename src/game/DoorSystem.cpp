@@ -45,6 +45,7 @@
 #include "../marni/PSXTexture.h"
 #include "TmdRenderer.h"
 #include "FileLoader.h"
+#include "BattleGame.h"      // battle_enter_room (Saturn Battle Game mod)
 
 // --- forward declarations of port-side helpers ---------------------------------
 extern int  PSXObject_Store(CMarniDirect3DTMD* self, int* tmdHdr, int objIndex,
@@ -1512,7 +1513,17 @@ void room_transition_load(void)
         g_scaPoolPtr = g_scaPoolBase;
         g_roomId = (unsigned char)(g_nextRoomDest & 0x1f);
 
-        if (g_nextRoomDest < 0x20) {
+        if (g_battleActive) {
+            // Mod: Saturn Battle Game. Every door there - the safe rooms' own
+            // and the ones battle_frame opens when a fight room is clear -
+            // carries a battle room number; it resolves to that room's base
+            // stage/room, and the room file comes from battle/ (RoomInit.cpp).
+            if (battle_enter_room(g_nextRoomDest)) {
+                init_room();
+            } else {
+                room_set();
+            }
+        } else if (g_nextRoomDest < 0x20) {
             dbg_printf("[roomtrans] loading same-stage room %u (stage %u)\n",
                        (unsigned int)g_roomId, (unsigned int)g_stageId);
             room_set();

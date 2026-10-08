@@ -1088,7 +1088,12 @@ static void crow_state_run(void)
         // action_behavior 0x14, action_state 0 or 3. That is the cue a perched
         // crow watches for; it scatters with a random half-turn.
         unsigned int playerState = *(unsigned int*)((char*)&g_playerEntity + 0x84);
-        if ((playerState == 0x140301 || playerState == 0x3140301)
+        // Mod (Battle Game): perched crows also take off once the player is
+        // near - they otherwise only scatter at a gunshot, and with no ammo
+        // left the room could never be cleared.
+        extern int g_battleActive;
+        bool battleWake = g_battleActive && CR_DIST < 9000 && g_playerEntity.health > 0;
+        if ((playerState == 0x140301 || playerState == 0x3140301 || battleWake)
             && (ENTITY->behavior_flags & 0x10) == 0) {
             ENTITY->angle = (short)(ENTITY->angle + (short)((rand() & 1) * 0x40));
             crow_set_state(1, 1, 13, 0);

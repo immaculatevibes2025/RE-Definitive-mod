@@ -6,6 +6,7 @@
 #include <cstring>
 #include "../DebugPrint.h"
 #include "dc/ArrangeStages.h"   // room_file_stage() - see cmd_state_word_set
+#include "BattleGame.h"        // battle_on_enemy_set (Saturn Battle Game mod)
 
 // Forward declarations for functions defined in other files
 extern unsigned int set_message_display(unsigned short msg_id, unsigned short pause_game);
@@ -915,6 +916,10 @@ int cmd_enemy_set(void)
         ENTITY->pSca_hit_data = g_scaPoolPtr;
         g_enemy_count++;
         g_scaPoolPtr += (unsigned int)g_ScdOpcodes[5] * 6;
+
+        // Mod: Saturn Battle Game - note the death flag for the room-clear
+        // test, and room 12's Zombie Wesker. No-op outside the mode.
+        battle_on_enemy_set(ENTITY, enemySlot);
     }
 
     g_ScdOpcodes += 0x16;
@@ -2492,6 +2497,10 @@ int cmd_costume_variant_set(void)
 int cmd_costume_variant_test(void)
 {
     g_ScdOpcodes += 2;
+    // Mod: variant 2 is the Saturn outfit (FUN_0040c560). The wardrobe room
+    // reads this to decide which closet is "already worn"; the Saturn outfit
+    // counts as neither PC outfit's, so the second closet stays usable.
+    if (g_bCostumeVariant == 2) return 0;
     return (int)g_bCostumeVariant;
 }
 
@@ -3138,9 +3147,21 @@ void FUN_0048c020(int param)
 // SCD opcode 0x4F writes this flag; opcode 0x50 (cmd_costume_variant_test) returns it as its
 // condition result, so a script can set a flag with 0x4F and branch on it later.
 // ============================================================================
+int g_wardrobeSaturnPending = 0;    // Mod: the Saturn closet was chosen
+
 void FUN_0040c560(int param)
 {
-    g_bCostumeVariant = (unsigned char)param & 1;
+    // Mod: the Saturn release's own outfits (em1034 / em1035, converted from
+    // its EM1032 / EM1033 - tools/saturn/satcostume.py). The wardrobe's third
+    // closet (RoomInit.cpp wardrobe_saturn_setup) raises
+    // g_wardrobeSaturnPending, and the outfit it sets is variant 2. Not in the
+    // Director's Cut, which has its own wardrobe and models.
+    unsigned char v = (unsigned char)param & 1;
+    if (g_wardrobeSaturnPending) {
+        v = 2;
+        g_wardrobeSaturnPending = 0;
+    }
+    g_bCostumeVariant = v;
 }
 
 // ============================================================================

@@ -71,6 +71,7 @@
 //
 // All original addresses from Ghidra.
 // ============================================================================
+#include <cmath>
 #include "EntityCommon.h"
 #include "../../Globals.h"
 #include "../BioCard.h"
@@ -285,6 +286,8 @@ static void hunter_death_pounce(void);          // 0x00419540
 
 static void hunter_death_fall_driver(void);     // 0x00419310
 static void hunter_track_player_joint(void);    // 0x004199e0
+static void tick_arm_restore_if_idle(void);     // mod: Tick grab
+static void tick_head_update(void);             // mod: Tick grab
 static void hunter_recenter_on_joint(unsigned char which); // 0x00419b50
 
 static void hunter_scd_state_dispatch(void);    // 0x0048f410
@@ -379,6 +382,7 @@ void hunter_update(void) // 0x004161f0
 
     if ((g_message_flags & 4) != 0) {
         hunter_state_table[ENTITY->state]();
+        if (mod_ticks_active()) { tick_arm_restore_if_idle(); tick_head_update(); }
 
         // The action layer (state 2) skips collision: its behaviours move the
         // hunter by hand. Everything else gets the full SCA + room pass.
@@ -609,12 +613,34 @@ static void hunter_state_ret(void) // 0x00416730
 // Variant 3 has no handler (NULL slot); coward variants (flags bit 0x10) get
 // the flee logic instead.
 // ============================================================================
+static void tick_variant_2_ai(void);            // mod: Saturn GAME2.PRG 0x0606d484
+
 static void hunter_variant_dispatch(void) // 0x004167f0
 {
     int dz = PLAYER_T_INT[2] - H_POS_T[2];
     int dx = PLAYER_T_INT[0] - H_POS_T[0];
     g_playerDisplacement = (dz < 0 ? -dz : dz) + (dx < 0 ? -dx : dx);
 
+    // Mod: a Tick leaves a dead player alone (it used to run back and maul
+    // the body after the roar).
+    if (mod_ticks_active() && g_playerEntity.health < 0) {
+        if (ENTITY->action_behavior == 9) return;   // let the roar play out
+        if (ENTITY->action_behavior != 0) {
+            ENTITY->action_behavior = 0;
+            ENTITY->action_state = 0;
+        }
+        return;
+    }
+    // Mod (testing, [Mods] TickAlwaysDecapitate): every Tick runs the Tick
+    // decision routine, whatever variant its room placed - the Battle Game's
+    // Hunters are mostly variants 0/1/4, which never reach the leap.
+    {
+        extern bool g_bTickAlwaysDecap;          // ConfigFile.cpp
+        if (mod_ticks_active() && g_bTickAlwaysDecap) {
+            tick_variant_2_ai();
+            return;
+        }
+    }
     if ((ENTITY->behavior_flags & 0x10) != 0) {
         hunter_coward_ai();
         return;
@@ -755,8 +781,14 @@ static void hunter_variant_1_ai(void) // 0x00416c30
 // (under hunter_player_health_gate for their character) at medium range with
 // the pounce latch set lets the hunter leap.
 // ============================================================================
+static void tick_variant_2_ai(void);            // mod: Saturn GAME2.PRG 0x0606d484
+
 static void hunter_variant_2_ai(void) // 0x00416ca0
 {
+    if (mod_ticks_active()) {
+        tick_variant_2_ai();
+        return;
+    }
     short playerHealth = g_playerEntity.health;
 
     int dz = PLAYER_T_INT[2] - H_POS_T[2];
@@ -848,6 +880,124 @@ static void hunter_roll_leap_fixed(void)
     ENTITY->ignore_player_flag = 1;
     ENTITY->action_behavior = 5;
     ENTITY->action_state = 0;
+}
+
+// ============================================================================
+// MOD: Sega Saturn Tick ([Mods] Ticks, g_bModTicks)
+//
+// tick_variant_2_ai - port of the Saturn release's Tick decision routine
+// (GAME2.PRG 0x0606d484, overlay base 0x0602B000), which takes the slot of
+// hunter_variant_2_ai in the Tick's variant table. Differences from the Hunter:
+//
+//  * Decapitation gate: player health < maxHealth / 3 (the Saturn multiplies
+//    by 0xAAAAAAAB and shifts), not the fixed {105, 72} table, and always
+//    rolls hunter_pounce_chance_low (8 in 16) - no Hunter-health tiers.
+//  * Range: the latch is KEPT only within 4000 (Hunter: cleared under 0x157C
+//    unless the player is nearly dead) and is cleared while the player is
+//    being attacked or a wall lies ahead (2048-unit probe at angle + 160).
+//  * Trigger: facing within 0x20 (Hunter 0x2C8) and distance <= 3999.
+//    The leap aims straight at the player; it does not return afterwards,
+//    the remaining checks run as on the Saturn.
+//  * Close slash (behaviour 4) at <= 1999 (Hunter < 3000).
+// Everything else matches the Hunter's routine instruction for instruction.
+// ============================================================================
+extern unsigned short effect_probe_ground(SVECTOR* pos, SVECTOR* offset, unsigned int radius); // 0x0047daf0
+
+#define TICK_GRAB_SEL_AI 9
+
+static void tick_roll_leap(void)
+{
+    // Pick the left or right claw exactly as the Hunter does (joint 6 or 9,
+    // animation 0x12 - sel), but aim at the player rather than a point
+    // 150 units to the side: the Saturn Tick only re-derives its velocity.
+    // Mod: the arm-reach grab (tick_grab) - no leap, no claw-side offset.
+    H_JOINT_SEL = TICK_GRAB_SEL_AI;
+    H_TARGET_X = (short)PLAYER_T_INT[0];
+    H_TARGET_Z = (short)PLAYER_T_INT[2];
+    Add_speedXZ(0);
+    ENTITY->ignore_player_flag = 1;
+    ENTITY->action_behavior = 5;
+    ENTITY->action_state = 0;
+}
+
+static void tick_variant_2_ai(void)
+{
+    short playerHealth = g_playerEntity.health;
+
+    int dz = PLAYER_T_INT[2] - H_POS_T[2];
+    int dx = PLAYER_T_INT[0] - H_POS_T[0];
+    g_playerDisplacement = (dz < 0 ? -dz : dz) + (dx < 0 ? -dx : dx);
+    g_scaled_down_dist = ENTITY->action_behavior;
+    H_POUNCE_LATCH = 0;
+
+    // Forward probe (Saturn 0x0604d4e0 + 0x0604cbc8): 2048 units along the
+    // facing angle + 160, tested against the room boundaries.
+    g_svecScratch.x = 0x800;
+    g_svecScratch.y = 0;
+    g_svecScratch.z = 0;
+    RotMatrixY(ENTITY->angle + 0xA0, &g_matrixScratch);
+    ApplyMatrixSV(&g_matrixScratch, &g_svecScratch, &g_svecScratch);
+    unsigned short wallAhead = effect_probe_ground((SVECTOR*)H_POS, &g_svecScratch, 2);
+
+    // Testing ([Mods] TickAlwaysDecapitate=1): every Tick in range goes for
+    // the decapitation leap, whatever the player's health.
+    extern bool g_bTickAlwaysDecap;          // ConfigFile.cpp
+    if (playerHealth > 0 &&
+        (g_bTickAlwaysDecap || playerHealth < (short)(g_playerEntity.maxHealth / 3))) {
+        H_POUNCE_LATCH = g_bTickAlwaysDecap ? 1 : hunter_pounce_chance_low[rand() & 0xF];
+        if (g_playerDisplacement > 3500 ||
+            g_playerEntity.isBeingAttackedFlag != 0 ||
+            (wallAhead == 1 && !g_bTickAlwaysDecap)) {
+            H_POUNCE_LATCH = 0;
+        }
+    }
+    if (H_REPAUSE != 0 && !g_bTickAlwaysDecap) {
+        H_POUNCE_LATCH = 0;
+    }
+
+    if (H_PATH_LATCH != 0 && g_playerDisplacement < 6000) {
+        if (g_scaled_down_dist != 2) {
+            ENTITY->action_state = 0;
+            ENTITY->blend_counter = 7;
+        }
+        ENTITY->action_behavior = 2;
+        ENTITY->ignore_player_flag = 0;
+    }
+
+    if ((short)turn_toward_target(PLAYER_T, 0x40) == 0 &&
+        g_playerDisplacement < 3500 &&   // the stretched arm reaches this far
+        H_POUNCE_LATCH != 0) {
+        tick_roll_leap();
+        if (g_bTickAlwaysDecap) return;   // testing: no close slash instead
+    }
+
+    if ((g_playerEntity.isBeingAttackedFlag & 0x80) != 0 && g_playerDisplacement < 3000) {
+        ENTITY->ignore_player_flag = 1;
+        ENTITY->action_behavior = 9;
+        ENTITY->action_state = 0;
+    }
+
+    if (g_playerEntity.isBeingAttackedFlag == 0) {
+        if (check_line_of_sight((VECTOR*)PLAYER_T_INT) == 0 &&
+            g_playerDisplacement < 2000 &&
+            (short)turn_toward_target(PLAYER_T, 0x80) == 0) {
+            ENTITY->ignore_player_flag = 1;
+            ENTITY->action_behavior = 4;
+            ENTITY->action_state = 0;
+            return;
+        }
+        if (H_PATH_LATCH != 0 && (ENTITY->behavior_flags & 0xF) != 7 &&
+            g_playerDisplacement > 0x1900 &&
+            (short)turn_toward_target(PLAYER_T, 0x20) == 0 &&
+            (g_playerEntity.action_behavior == 0x12 ||
+             (g_playerEntity.action_behavior == 0x13 && (g_RandSeed & 1) != 0)) &&
+            (char)is_facing_toward_entity(&g_playerEntity) == 0) {
+            ENTITY->ignore_player_flag = 1;
+            ENTITY->action_behavior = 6;
+            ENTITY->action_state = 0;
+            ENTITY->status_flags &= 0x1F;
+        }
+    }
 }
 
 // ============================================================================
@@ -1088,12 +1238,403 @@ void (*const hunter_attack_sub_table[6])(void) = {
 // Drives the aimed-leap sub-states; while the wind-up plays it turns toward
 // the stored target point and past frame 0x17 charges forward.
 // ============================================================================
+
+// ============================================================================
+// MOD: Saturn-style Tick grab (approximation). The Saturn Tick shares the
+// Hunter's animations; its long-reach grab is made in code. Here: the Tick
+// stands and swings (animation 5) while its right arm - joints 8 and 9, the
+// forearm and the claw - stretches toward the player; a catch pins the player
+// to the claw (the Hunter's own tracker), the arm draws back in, pulling them
+// close, and the Hunter's grab-hold behaviour (7) does the decapitation.
+// ============================================================================
+#define TICK_GRAB_SEL      9       // claw joint (its parent 8 is the forearm)
+#define TICK_GRAB_REACH    2200    // trigger distance (tick_variant_2_ai)
+#define TICK_PULL_FRAMES   10    // pull-in, long enough to read on screen
+
+namespace {
+struct TickArm { void* ent; int t8[3], t9[3]; int k256; int holdX, holdZ, sliced, cryAt; };
+TickArm s_tickArm[8];
+
+TickArm* tick_arm(bool create)
+{
+    for (TickArm& a : s_tickArm) if (a.ent == ENTITY) return &a;
+    if (!create) return NULL;
+    for (TickArm& a : s_tickArm) {
+        if (a.ent == NULL) {
+            a.ent = ENTITY;
+            JointStruct* j = H_JOINTS;
+            for (int i = 0; i < 3; i++) {
+                a.t8[i] = j[8].transform.t[i];
+                a.t9[i] = j[9].transform.t[i];
+            }
+            a.k256 = 256;
+            return &a;
+        }
+    }
+    return NULL;
+}
+
+// Stretch the arm: k256 = 256 is the model's own length.
+void tick_arm_set(TickArm* a, int k256)
+{
+    JointStruct* j = H_JOINTS;
+    a->k256 = k256;
+    // The stretch itself is a scale on the elbow joint's bone axis, applied
+    // in tick_arm_point: moving the joints apart instead left gaps between
+    // the arm's rigid pieces. Only the offsets are put back here.
+    for (int i = 0; i < 3; i++) {
+        j[8].transform.t[i] = a->t8[i];
+        j[9].transform.t[i] = a->t9[i];
+    }
+    // Make EntityComputeJointWorldMatrices rebuild these two world matrices
+    // from the stretched offsets even on a frame the animation left them be.
+    j[8].flags |= 2;
+    j[9].flags |= 2;
+}
+} // namespace
+
+// The severed head: thrown off by the swing, then it falls to the floor and
+// stays there. The player's death sequence detaches joint 1 (the head) and
+// stops rebuilding its world matrix, so whatever is written here is where the
+// head is drawn; nothing else moves it, which is why it used to hang in the
+// air where the claw let go.
+namespace {
+struct HeadDrop { bool active; double x, y, z, vx, vy, vz; int floorY; };
+HeadDrop s_head;
+}
+
+static void tick_head_start(void)
+{
+    JointStruct* pj = g_playerEntity.jointsStructs;
+    if (pj == NULL) return;
+    s_head.active = true;
+    s_head.x = pj[1].world.t[0];
+    s_head.y = pj[1].world.t[1];
+    s_head.z = pj[1].world.t[2];
+    // Away from the Tick, a little to the side of the swing, and upward.
+    double dx = s_head.x - H_POS_T[0], dz = s_head.z - H_POS_T[2];
+    double L = sqrt(dx * dx + dz * dz);
+    if (L < 1.0) { dx = 1.0; dz = 0.0; L = 1.0; }
+    s_head.vx = dx / L * 55.0 - dz / L * 30.0;
+    s_head.vz = dz / L * 55.0 + dx / L * 30.0;
+    s_head.vy = -90.0;                                  // up (Y grows downward)
+    s_head.floorY = (short)g_playerEntity.posY - 90;    // head radius off the floor
+}
+
+// Per frame, from hunter_update.
+void tick_head_apply(void);
+static void tick_head_update(void)
+{
+    tick_head_apply();
+}
+
+// Writes the head's position into the player's head joint. Called again from
+// the game loop right after the player's skeleton is posed: the player's own
+// death sequence rewrites this joint every frame, and that later write is the
+// one that was being drawn - the floating head.
+void tick_head_apply(void)
+{
+    if (!s_head.active) return;
+    JointStruct* pj = g_playerEntity.jointsStructs;
+    if (pj == NULL || g_playerEntity.health >= 0) { s_head.active = false; return; }
+    // Bit 0 is what render_entity draws a joint by; the head (joint 1, the
+    // one the decapitation detaches and the claw carried) is switched off.
+    // Joint 2 is the head mesh (the knock-down decapitation in
+    // PlayerAnimations.cpp tints and detaches joints + 2 as "head"); joint 1
+    // is the neck the decapitation and the claw use. Hide both.
+    pj[1].flags = (unsigned char)((pj[1].flags & ~1) | 0x40);
+    pj[2].flags = (unsigned char)(pj[2].flags & ~1);
+}
+
+// Called every frame: puts the arm back once the grab is over (hit, killed,
+// or the hold behaviour took over).
+static void tick_arm_restore_if_idle(void)
+{
+    TickArm* a = tick_arm(false);
+    if (a == NULL) return;
+    if (ENTITY->state == 1 && ENTITY->action_behavior == 5) return;   // grab running
+    tick_arm_set(a, 256);
+    a->ent = NULL;
+}
+
+// Point the right arm (shoulder 7, elbow 8, wrist 9) straight at the
+// player, horizontal at shoulder height, overriding the animation's arm pose
+// for this frame. The chest's world matrix (joint 1, last frame) gives the
+// shoulder's parent frame: local = chest^T * wanted, with the arm's own +Y
+// (its bone direction, see the 0/538/0-ish relpos) along the line to the
+// player and its +X up.
+static void tick_arm_point_yaw(double yawDeg);
+static void tick_arm_point(void) { tick_arm_point_yaw(0.0); }
+
+static void tick_arm_point_yaw(double yawDeg)
+{
+    JointStruct* j = H_JOINTS;
+    TickArm* arm = tick_arm(false);
+    const int k256 = arm ? arm->k256 : 256;
+    int dx = PLAYER_T_INT[0] - H_POS_T[0];
+    int dz = PLAYER_T_INT[2] - H_POS_T[2];
+    double L = sqrt((double)dx * dx + (double)dz * dz);
+    if (L < 1.0) return;
+    // The bone axis runs from the hand back to the shoulder in this
+    // skeleton: pointing it AWAY from the player puts the claw on them.
+    double ux = dx / L, uz = dz / L;
+    if (yawDeg != 0.0) {   // swing the aim around the vertical axis
+        double r = yawDeg * 3.14159265358979 / 180.0, c = cos(r), s = sin(r);
+        double nx = ux * c - uz * s, nz = ux * s + uz * c;
+        ux = nx; uz = nz;
+    }
+    double Y[3] = { -ux, 0.0, -uz };
+    double X[3] = { 0.0, -1.0, 0.0 };        // up (world Y grows downward)
+    double Z[3] = { X[1] * Y[2] - X[2] * Y[1], X[2] * Y[0] - X[0] * Y[2], X[0] * Y[1] - X[1] * Y[0] };
+    double W[3][3];
+    for (int r = 0; r < 3; r++) { W[r][0] = X[r]; W[r][1] = Y[r]; W[r][2] = Z[r]; }
+    double P[3][3];
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) P[r][c] = j[1].world.m[r][c] / 4096.0;
+    // orthonormalise P's columns (the world matrix may carry a uniform scale)
+    for (int c = 0; c < 3; c++) {
+        double n = sqrt(P[0][c] * P[0][c] + P[1][c] * P[1][c] + P[2][c] * P[2][c]);
+        if (n < 1e-6) return;
+        for (int r = 0; r < 3; r++) P[r][c] /= n;
+    }
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) {
+            double v = P[0][r] * W[0][c] + P[1][r] * W[1][c] + P[2][r] * W[2][c];
+            j[7].transform.m[r][c] = (short)(v * 4096.0);
+            // Elbow: stretched along its bone axis (column 1). The forearm and
+            // claw (joint 9) inherit it, so the arm reads as one long limb.
+            j[8].transform.m[r][c] = (short)(r == c ? (c == 1 ? 4096 * k256 / 256 : 4096) : 0);
+            j[9].transform.m[r][c] = (short)(r == c ? 4096 : 0);
+        }
+    j[7].flags |= 2;
+    j[8].flags |= 2;
+    j[9].flags |= 2;
+}
+
+// Diagnostics for the Tick grab (crash.log). Remove once it is settled.
+static void tick_log(const char* what)
+{
+    char m[256];
+    JointStruct* pj = g_playerEntity.jointsStructs;
+    int grp = (ENTITY->pad_160[1] & 0x70) >> 4;
+    sprintf(m, "tick %s: st=%d t=%d | pl anim=%d fr=%d beh=%d ast=%d hp=%d att=%d | head fl=%02X w=(%d,%d,%d) | pl t=(%d,%d,%d) | snd3=%d snd5=%d",
+            what, ENTITY->action_state, (int)H_TICKS,
+            g_playerEntity.animationId, g_playerEntity.animFrameId,
+            g_playerEntity.action_behavior, g_playerEntity.action_state,
+            g_playerEntity.health, g_playerEntity.isBeingAttackedFlag,
+            pj ? pj[1].flags : -1, pj ? pj[1].world.t[0] : 0, pj ? pj[1].world.t[1] : 0,
+            pj ? pj[1].world.t[2] : 0,
+            PLAYER_T_INT[0], PLAYER_T_INT[1], PLAYER_T_INT[2],
+            g_emSndBanks[(3 + grp * 10) * 2], g_emSndBanks[(5 + grp * 10) * 2]);
+    crashlog_mark(m);
+}
+
+extern void tick_cry_play(int roar);   // SoundSystem.cpp: 0 TK_att, 1 TK_smash
+
+static void tick_grab(void)
+{
+    TickArm* a = tick_arm(true);
+    int dz = PLAYER_T_INT[2] - H_POS_T[2];
+    int dx = PLAYER_T_INT[0] - H_POS_T[0];
+    int dist = (dz < 0 ? -dz : dz) + (dx < 0 ? -dx : dx);
+
+    switch (ENTITY->action_state) {
+    case 0:   // standing (idle animation 0x15), the arm reaches out
+        ENTITY->action_state = 1;
+        ENTITY->animation_frame_id = 0;
+        ENTITY->timing_control = 0;
+        ENTITY->blend_counter = 7;
+        ENTITY->animationId = 0x15;
+        H_SPEED_W = 0;
+        H_JOINT_SEL = TICK_GRAB_SEL;
+        H_TICKS = 0;
+        Snd_em(2);
+        // fall through
+    case 1: { // reach: the arm stretches out to the player
+        int f = H_TICKS++;
+        // Reach far enough for the claw to land on the player: the arm (two
+        // ~530-unit segments from the shoulder) is stretched in proportion
+        // to the distance, at least 1.75x so the reach always reads.
+        int want = dist * 256 / 1000;
+        if (want < 384) want = 384;
+        if (want > 256 * 6) want = 256 * 6;
+        int k = (f >= 8) ? want : 256 + (want - 256) * f / 8;
+        if (a) tick_arm_set(a, k);
+        g_playerPosScratch.x = PLAYER_T_INT[0];
+        g_playerPosScratch.z = PLAYER_T_INT[2];
+        g_playerPosScratch.y = 0;
+        ENTITY->angle = (short)(ENTITY->angle + (short)turn_toward_target(&g_playerPosScratch, 0x18));
+
+        if ((ENTITY->behavior_flags & 0x40) == 0 && g_playerEntity.health > 0 &&
+            f >= 6 && f <= 16 &&
+            g_playerEntity.isBeingAttackedFlag == 0 &&
+            (g_playerEntity.jointsStructs[1].flags & 0x40) == 0) {
+            hunter_seed_from_dead_move();
+            MATRIX* claw = (MATRIX*)((char*)H_JOINTS + TICK_GRAB_SEL * 0x7C + 0x44);
+            if (FUN_0048ae00(claw, &g_playerPosScratch, 1100, PLAYER_T_INT) != 0) {
+                // Caught. Not yet the decapitation pose (player anim 7 frame
+                // 6) - that starts the player's own death sequence on the
+                // spot. While being reeled in the player takes the clawed
+                // stagger the Hunter's swipe gives (anim 2, behaviour 100);
+                // anim 7 is set when the pull ends.
+                g_playerEntity.isBeingAttackedFlag = 1;
+                *(unsigned int*)&g_playerEntity.animationId = 0x00640002;
+                ENTITY->action_state = 2;
+                H_TICKS = TICK_PULL_FRAMES;
+                tick_cry_play(0);   // the grab cry (Saturn: as it grabs)
+                tick_log("catch");
+                Snd_em(5);
+                return;
+            }
+        }
+        Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x200);
+        tick_arm_point();
+        if (f >= 22) {
+            // missed: arm back, back to the chase
+            if (a) tick_arm_set(a, 256);
+            H_STATE_BLOCK = 0x10001;
+            H_JOINT_SEL = 0;
+        }
+        return;
+    }
+    case 2: { // pull in: the arm shortens, dragging the player with the claw
+        DAT_004bd2b0 = 1;
+        if (a) {
+            int k = a->k256 - (a->k256 - 256) / (H_TICKS > 0 ? H_TICKS : 1);
+            tick_arm_set(a, k);
+        }
+        tick_arm_point();
+        // Reel the player in: slide them along the ground to a spot just in
+        // front of the Tick, so the decapitation happens up close. (The
+        // tracker only moves the held chest joint; the body follows its own
+        // position, which stayed where the claw caught it.)
+        {
+            const int stopDist = 950;
+            int px = PLAYER_T_INT[0], pz = PLAYER_T_INT[2];
+            int ddx = px - H_POS_T[0], ddz = pz - H_POS_T[2];
+            double L = sqrt((double)ddx * ddx + (double)ddz * ddz);
+            if (L > stopDist) {
+                int steps = H_TICKS > 0 ? H_TICKS : 1;
+                double nl = L - (L - stopDist) / steps;
+                int nx = H_POS_T[0] + (int)(ddx * nl / L);
+                int nz = H_POS_T[2] + (int)(ddz * nl / L);
+                g_playerEntity.scaMatrixData.localMatrix.t[0] = nx;
+                g_playerEntity.scaMatrixData.localMatrix.t[2] = nz;
+                g_playerEntity.position.x = (short)nx;
+                g_playerEntity.position.z = (short)nz;
+            }
+        }
+        if (--H_TICKS <= 0) {
+            if (a) {
+                tick_arm_set(a, 256);
+                a->holdX = PLAYER_T_INT[0];
+                a->holdZ = PLAYER_T_INT[2];
+                a->sliced = 0;
+            }
+            // Up close: the Hunter's own decapitation. Exactly what its
+            // pounce does on a catch - the player's decapitation pose, then
+            // the grab-hold behaviour (7), which plays the claw-9 kill
+            // animation (animationId + 1) and carries the head with the claw.
+            hunter_seed_from_dead_move();
+            g_playerEntity.isBeingAttackedFlag = 1;
+            g_playerEntity.animationId = 7;
+            g_playerEntity.animFrameId = 6;
+            g_playerEntity.action_behavior = 0;
+            g_playerEntity.action_state = 0;
+            ENTITY->animationId = (unsigned char)(0x12 - TICK_GRAB_SEL);
+            H_JOINT_SEL = TICK_GRAB_SEL;
+            s_head.active = false;
+            if (a) a->ent = NULL;
+            Snd_em(5);
+            tick_log("to hunter kill");
+            H_BEH_WORD = 7;
+            return;
+            ENTITY->action_state = 3;
+            ENTITY->animation_frame_id = 0;
+            ENTITY->timing_control = 0;
+            ENTITY->blend_counter = 7;
+            ENTITY->animationId = 0x15;   // standing
+            H_TICKS = 0;
+        }
+        return;
+    }
+    case 3: { // the slice: standing, the same claw sweeps across the neck
+        // Swing timeline (frames): 0-8 wind back to the right, 8-26 sweep
+        // through the neck to the left, then a short hold and the roar.
+        const int WIND = 5, SWEEP = 11, HOLD = 10;
+        int t = H_TICKS++;
+        DAT_004bd2b0 = 1;
+        double yaw;
+        if (t < WIND)              yaw = 85.0 * t / WIND;
+        else if (t < WIND + SWEEP) yaw = 85.0 - 150.0 * (t - WIND) / SWEEP;
+        else                       yaw = -65.0;
+        Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x200);
+        if (a) a->k256 = 256;      // its own arm length - no stretch on the swipe
+        tick_arm_point_yaw(yaw);
+        if (a && !a->sliced) {
+            g_playerEntity.scaMatrixData.localMatrix.t[0] = a->holdX;
+            g_playerEntity.scaMatrixData.localMatrix.t[2] = a->holdZ;
+            g_playerEntity.position.x = (short)a->holdX;
+            g_playerEntity.position.z = (short)a->holdZ;
+            if (t >= WIND && yaw <= 0.0) {
+                a->sliced = 1;
+                hunter_seed_from_dead_move();   // the bite does this before anim 7
+                // The death sequence takes its animation from this flag
+                // (attackAnim = flag - 1). The pull-in's stagger had cleared
+                // it to 0, which made it 0xFF: a garbage clip that threw the
+                // body thousands of units away (the "invisible" body), put the
+                // head under the floor and skipped the bloody death screen.
+                g_playerEntity.isBeingAttackedFlag = 1;
+                g_playerEntity.animationId = 7;
+                g_playerEntity.animFrameId = 6;
+                g_playerEntity.action_behavior = 0;
+                g_playerEntity.action_state = 0;
+                Snd_em(5);
+                a->cryAt = t + 4;   // the cry, just after the slash sound
+                tick_log("slice");
+                s_head.active = false;
+                H_JOINT_SEL = TICK_GRAB_SEL;
+            }
+        } else if (a && a->sliced && !s_head.active) {
+            // First frame after the cut: the player's death sequence has
+            // detached the head - throw it from where it is.
+            tick_head_start();
+            tick_log("head start");
+        }
+        if (a && a->sliced) {
+            if (t == a->cryAt) { tick_cry_play(1); tick_log("cry"); }   // TK_att.wav
+            tick_log("after cut");
+        }
+        if (t >= WIND + SWEEP + HOLD) {
+            tick_log("to roar");
+            if (a) { a->k256 = 256; a->ent = NULL; }
+            H_JOINT_SEL = 0;
+            H_BEH_WORD = 9;   // the roar
+        }
+        return;
+    }
+    default:
+        H_STATE_BLOCK = 0x10001;
+        return;
+    }
+}
+
 static void hunter_behavior_pounce(void) // 0x00417760
 {
     H_POUNCE_LATCH = 0;
+    if (mod_ticks_active() && (ENTITY->behavior_flags & 0x40) == 0) {
+        tick_grab();
+        return;
+    }
     hunter_pounce_sub_table[ENTITY->action_state]();
 
     if (ENTITY->animation_frame_id < 0x17) {
+        if (mod_ticks_active()) {
+            // Mod: the Saturn Tick's leap keeps turning toward the player
+            // (GAME2.PRG 0x0606de98) instead of holding a fixed aim point.
+            H_TARGET_X = (short)PLAYER_T_INT[0];
+            H_TARGET_Z = (short)PLAYER_T_INT[2];
+        }
         g_playerPosScratch.x = H_TARGET_X;
         g_playerPosScratch.z = H_TARGET_Z;
         g_playerPosScratch.y = 0;
@@ -1485,8 +2026,44 @@ static void hunter_dodge_land(void) // 0x00417e40
 // Four sub-states: bite down, hold (tracking the player's head joint via
 // hunter_track_player_joint), shake, and release back to the AI layer.
 // ============================================================================
+static unsigned int s_tickHalf = 0;   // mod: half-speed frame toggle
+static bool s_tickBurst = false;
+#define TICK_SWIPE_FRAMES 50   // mod: frames of slow swipe before the roar
+static int s_tickAfterBurst = 0;    // mod: frames since the head burst      // mod: head already burst this kill
+
+// Mod: the moment the slice kills the player the Tick lets go of the head -
+// it bursts in blood, stops being drawn, and the roar starts. Returns true
+// once burst, so the caller stops pinning the head to the claw.
+static bool tick_burst_head_if_dead(void)
+{
+    if (!mod_ticks_active()) return false;
+    if (s_tickBurst) return true;
+    if (g_playerEntity.health >= 0) return false;
+    JointStruct* pj = g_playerEntity.jointsStructs;
+    if (pj != NULL) {
+        hunter_seed_from_dead_move();
+        Effect_CreateBillboard(0, 3, 0, &pj[1].world, &g_playerPosScratch, 0);
+        Effect_CreateBillboard(0, 0, 0, NULL, pj[1].world.t, 0);
+        s_head.active = true;
+        tick_head_apply();
+    }
+    tick_log("head burst");
+    s_tickBurst = true;
+    return true;
+}
+
 static void hunter_behavior_grabhold(void) // 0x00417ee0
 {
+    {
+        static int lastSt = -1;
+        if (mod_ticks_active() && ENTITY->action_state != lastSt) {
+            char m[80];
+            sprintf(m, "tick hold st=%d anim=%d ticks=%d", ENTITY->action_state,
+                    ENTITY->animationId, (int)H_TICKS);
+            crashlog_mark(m);
+            lastSt = ENTITY->action_state;
+        }
+    }
     switch (ENTITY->action_state) {
     case 0:
         ENTITY->action_state = 1;
@@ -1495,28 +2072,72 @@ static void hunter_behavior_grabhold(void) // 0x00417ee0
         ENTITY->blend_counter = 7;
         ENTITY->animationId = (unsigned char)(ENTITY->animationId + 1);
         H_SPEED_W = 0;
+        s_tickBurst = false;
+        s_tickAfterBurst = 0;
         // fall through
     case 1:
-        ENTITY->action_state = (unsigned char)(ENTITY->action_state +
-            (char)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x200));
-        hunter_track_player_joint();
+        // Mod: the Tick plays the kill at half speed - the clip advances on
+        // every other frame (a fractional step never reported the clip's end,
+        // so the hold never finished and the Tick stood frozen).
+        // (Tick: the slice swipe at a fifth speed so it can be seen.)
+        if (!mod_ticks_active() || (++s_tickHalf % 5) == 0) {
+            ENTITY->action_state = (unsigned char)(ENTITY->action_state +
+                (char)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x200));
+        }
+        if (!tick_burst_head_if_dead()) {
+            hunter_track_player_joint();
+        } else if (++s_tickAfterBurst >= TICK_SWIPE_FRAMES) {
+            // Mod: the head is gone - drop the arm and roar right away
+            // instead of finishing the slice clip with the claw held out.
+            ENTITY->action_state = 4;
+        }
         return;
     case 2:
+        if (mod_ticks_active()) {
+            // Mod: no hold after the slice - straight to the roar.
+            ENTITY->action_state = 4;
+            return;
+        }
         ENTITY->action_state = 3;
         ENTITY->animation_frame_id = 0;
         ENTITY->timing_control = 0;
         ENTITY->animationId = (unsigned char)(ENTITY->animationId + 1);
-        H_TICKS = 5;
+        H_TICKS = mod_ticks_active() ? 40 : 5;  // Tick: 40 frames, then the roar
         // fall through
     case 3:
-        H_TICKS = (short)(H_TICKS - (unsigned short)
-            (unsigned char)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x400));
+        if (mod_ticks_active()) {
+            // A frame count, not clip ends: this clip's end never registered
+            // for the Tick (the log stopped here with the Tick frozen).
+            if ((++s_tickHalf & 1) == 0)
+                Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x400);
+            H_TICKS = (short)(H_TICKS - 1);
+        } else {
+            H_TICKS = (short)(H_TICKS - (unsigned short)
+                (unsigned char)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x400));
+        }
         if (H_TICKS == 0) {
             ENTITY->action_state = 4;
         }
-        hunter_track_player_joint();
+        if (!tick_burst_head_if_dead()) hunter_track_player_joint();
         return;
     case 4:
+        if (mod_ticks_active()) {
+            // Mod: the Tick roars over the body. The head is left to the
+            // player's own decapitation sequence. As the claw lets go the
+            // head bursts in blood and is no longer drawn (render flag off),
+            // and the Tick roars.
+            tick_burst_head_if_dead();   // no-op if it already burst
+            tick_cry_play(3);   // the roar
+            s_head.active = true;
+            tick_head_apply();
+            tick_log("hold done -> roar");
+            // Back to the AI layer (state 1) with behaviour 9, the howl. Just
+            // the behaviour word left the hold's own state in place, which
+            // has no slot 9 - the Tick froze.
+            H_JOINT_SEL = TICK_GRAB_SEL;
+            H_STATE_BLOCK = 0x00090001;   // state 1, ignore 0, behaviour 9, action 0
+            return;
+        }
         H_STATE_BLOCK = 0x10001;   // state 1, ignore 0, behavior 1, action 0
         return;
     default:
@@ -1656,7 +2277,10 @@ static void hunter_behavior_scream(void) // 0x00418400
     }
 
     if (ENTITY->animation_frame_id == 8 && hunter_scream_latch == 0) {
-        Snd_em(7);
+        // Mod: the Saturn Tick's howl slot (7) is a silent voice; its roar
+        // is the attack cry (slot 3, TK_att.wav - what the Saturn plays as
+        // it kills, matched against the Saturn footage).
+        if (mod_ticks_active()) { /* roar already playing (hold done) */ } else Snd_em(7);
         hunter_scream_latch = 1;
     }
 
@@ -2338,6 +2962,11 @@ static void hunter_track_player_joint(void) // 0x004199e0
     ApplyMatrixSV(&g_matrixScratch, &g_svecScratch, &g_svecScratch);
     pj[1].world.t[0] += g_svecScratch.x;
     pj[1].world.t[2] += g_svecScratch.z;
+    // Mod: the Tick holds the player by the neck - the tracker pins the
+    // player's chest joint to the claw, so drop the body until the neck is
+    // at the claw and the slice lands on it, not the midriff.
+    // (Joint 1 is the player's HEAD - the joint the decapitation detaches;
+    // the claw carries it. No offset.)
 }
 
 // ============================================================================

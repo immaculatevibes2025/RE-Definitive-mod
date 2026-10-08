@@ -10,6 +10,8 @@
 #include "../platform.h"
 
 #include <SDL2/SDL.h>
+#include "../../marni/MarniDX.h"      // Marni_DX (plat_apply_video_mode)
+#include "../../marni/MarniSystem.h"  // MarniSetAspectMode
 
 #include <dirent.h>
 #include <errno.h>
@@ -47,6 +49,7 @@ static SDL_Scancode VkToScancode(int vk)
     case VK_DOWN:     return SDL_SCANCODE_DOWN;
     case VK_SNAPSHOT: return SDL_SCANCODE_PRINTSCREEN;
     case VK_F1:       return SDL_SCANCODE_F1;
+    case VK_F2:       return SDL_SCANCODE_F2;
     case VK_F6:       return SDL_SCANCODE_F6;
     case VK_F8:       return SDL_SCANCODE_F8;
     case VK_F9:       return SDL_SCANCODE_F9;
@@ -359,4 +362,73 @@ void plat_window_destroy(HWND window)
 void plat_cursor_show(BOOL show)
 {
     SDL_ShowCursor(show ? SDL_ENABLE : SDL_DISABLE);
+}
+
+// ---------------------------------------------------------------------------
+// Display mode (port-added, the Video Options menu)
+//
+// SDL owns the window. Leave fullscreen BEFORE resizing - SDL ignores a size
+// set on a fullscreen-desktop window - then centre it. The main loop does not
+// forward SDL resize events, so refresh the renderer here: the GL backend's
+// WM_SIZE handler re-reads the drawable and recomputes the content rectangle,
+// and MarniSetAspectMode re-syncs CMarniDirect3D's cached size.
+// ---------------------------------------------------------------------------
+static SDL_Window* plat_game_window(void)
+{
+    return SDL_GL_GetCurrentWindow();
+}
+
+static int plat_window_display(void)
+{
+    SDL_Window* w = plat_game_window();
+    int d = (w != NULL) ? SDL_GetWindowDisplayIndex(w) : 0;
+    return d < 0 ? 0 : d;
+}
+
+void plat_display_size(DWORD* outWidth, DWORD* outHeight)
+{
+    SDL_DisplayMode mode;
+    DWORD w = 640, h = 480;
+    if (SDL_GetDesktopDisplayMode(plat_window_display(), &mode) == 0) {
+        w = (DWORD)mode.w;
+        h = (DWORD)mode.h;
+    }
+    if (outWidth)  *outWidth  = w;
+    if (outHeight) *outHeight = h;
+}
+
+void plat_display_work_size(DWORD* outWidth, DWORD* outHeight)
+{
+    SDL_Rect r;
+    DWORD w = 640, h = 480;
+    if (SDL_GetDisplayUsableBounds(plat_window_display(), &r) == 0) {
+        int top = 0, left = 0, bottom = 0, right = 0;
+        SDL_Window* win = plat_game_window();
+        if (win != NULL) SDL_GetWindowBordersSize(win, &top, &left, &bottom, &right);
+        if (r.w - left - right > 0) w = (DWORD)(r.w - left - right);
+        if (r.h - top - bottom > 0) h = (DWORD)(r.h - top - bottom);
+    }
+    if (outWidth)  *outWidth  = w;
+    if (outHeight) *outHeight = h;
+}
+
+void plat_apply_video_mode(DWORD width, DWORD height, BOOL fullScreen)
+{
+    SDL_Window* win = plat_game_window();
+    if (win == NULL) return;
+    if (fullScreen) {
+        SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    } else {
+        if (width < 320)  width = 320;
+        if (height < 240) height = 240;
+        SDL_SetWindowFullscreen(win, 0);
+        SDL_SetWindowSize(win, (int)width, (int)height);
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED_DISPLAY(plat_window_display()),
+                              SDL_WINDOWPOS_CENTERED_DISPLAY(plat_window_display()));
+    }
+    MarniDX* dx = Marni_DX();
+    if (dx != NULL) {
+        dx->HandleWindowMessage(NULL, WM_SIZE, 0, 0);
+        MarniSetAspectMode(dx->GetAspectMode());
+    }
 }

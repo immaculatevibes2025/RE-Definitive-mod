@@ -6,6 +6,7 @@
 #include "../DebugPrint.h"
 #include "entities/EntityCommon.h"
 #include "dc/Items.h"             // lockpick/ammo item ids the DC moved
+#include "dc/ArrangeStages.h"     // room_file_stage() (wardrobe mod)
 
 // ============================================================================
 // Player animation function stubs (populated into g_playerAnimFunctions by set_player_animations_functions)
@@ -2319,6 +2320,69 @@ static void* const g_playerCtrlFrameFunctions[5] = {
     (void*)player_ctrl_frame4,   // 0x004955e0
 };
 
+static void player_footstep_snd(int variant);   // below (mod: quick turn)
+
+// ============================================================================
+// Mod: QUICK KNIFE (Option Mode > GAMEPLAY, [Mods] QuickKnife). While its
+// button (pad-word bit 0x20000) is held the player swaps to the knife and
+// readies it, exactly as holding the ready button does with the knife
+// equipped; releasing it lowers the knife and puts the previous weapon back.
+// ============================================================================
+extern bool g_bQuickKnife;              // ConfigFile.cpp
+extern bool g_bQuickTurn;               // ConfigFile.cpp
+extern bool g_bReloadButton;            // ConfigFile.cpp
+
+// ============================================================================
+// Mod: RELOAD button (pad-word bit 0x40000; Option Mode > GAMEPLAY). Starts
+// the weapon's own reload (action_behavior 0x18, motion 0xE) before the gun is
+// empty - from the raised stance, or from standing/walking, which raises into
+// it. s_manualReload makes the reload's round consumption top the magazine up
+// instead of replacing it, so the rounds still in the gun are kept.
+// ============================================================================
+static int s_manualReload = 0;
+static char weapon_fire_check(void);            // below
+static int  manual_reload_wanted(void);         // below
+
+static void quick_knife_equip(unsigned char weaponId)
+{
+    g_playerEntity.equippedWeaponId = weaponId;
+    if (weaponId != 0) {
+        LoadSoundBank(weaponId, g_TimImageBuffer__bitmap);
+    }
+    LoadEquippedWeaponAnimation(weaponId, 0xE, (unsigned int)g_animationBuffer,
+                                (unsigned int)g_animObjectBuffer);
+}
+
+static void quick_knife_update(void)
+{
+    static int           s_qkActive = 0;
+    static unsigned char s_qkPrevWeapon = 0;
+    const bool held = g_bQuickKnife && (g_button_pressed_id & 0x20000) != 0;
+
+    if (!s_qkActive) {
+        // Start only from free control, so the swap never lands mid-action.
+        if (held && g_playerEntity.animFrameId == 0 && (short)g_playerEntity.health >= 0) {
+            s_qkPrevWeapon = (unsigned char)g_playerEntity.equippedWeaponId;
+            if (s_qkPrevWeapon != 1) quick_knife_equip(1);
+            s_qkActive = 1;
+        }
+    }
+    if (!s_qkActive) return;
+
+    if (held) {
+        g_PlayerDpadHeld |= 0x100;      // the ready button, for as long as it is held
+        return;
+    }
+    // Released: once the knife is lowered (back under normal control), put
+    // the previous weapon back.
+    if (g_playerEntity.animFrameId == 0 || (short)g_playerEntity.health < 0) {
+        if (s_qkPrevWeapon != 1 && g_playerEntity.equippedWeaponId == 1) {
+            quick_knife_equip(s_qkPrevWeapon);
+        }
+        s_qkActive = 0;
+    }
+}
+
 static void player_state_01_control(void)
 {
     // 0x00495180: dead - fall into the death animation and stop.
@@ -2371,6 +2435,64 @@ static void player_state_01_control(void)
     // 0x0049522c
     if (g_playerEntity.attackTimer != 0) {
         g_playerEntity.attackTimer--;
+    }
+
+    quick_knife_update();   // Mod: QUICK KNIFE (before anything reads the ready bit)
+
+    // Mod: RELOAD from free control - straight into the gun stance's reload.
+    if (g_playerEntity.animFrameId == 0 && manual_reload_wanted()) {
+        s_manualReload = 1;
+        g_playerEntity.animFrameId     = 3;
+        g_playerEntity.action_behavior = 0x18;
+        g_playerEntity.action_state    = 0;
+        return;
+    }
+
+    // Mod: QUICK TURN (Option Mode binding, pad-word bit 0x10000). On the
+    // press, while the player is free to move and not aiming (weapon raised),
+    // swing round 180 degrees over 8 frames - about 2.5x a manual turn. Aiming,
+    // a hit or any non-control state cancels the rest of the swing.
+    {
+        static int s_quickTurnLeft = 0;     // angle still to turn (0x800 = 180 deg)
+        const bool canTurn = g_playerEntity.animFrameId == 0 &&
+                             (g_PlayerDpadHeld & 0x100) == 0;
+        if (!canTurn) {
+            s_quickTurnLeft = 0;
+        } else {
+            if (s_quickTurnLeft == 0 && g_bQuickTurn && (g_PlayerPadPressed & 0x10000) != 0) {
+                s_quickTurnLeft = 0x800;
+            }
+            if (s_quickTurnLeft > 0) {
+                const bool starting = (s_quickTurnLeft == 0x800);
+                const int step = (s_quickTurnLeft < 0x100) ? s_quickTurnLeft : 0x100;
+                g_playerEntity.directionAngle =
+                    (short)(((unsigned short)g_playerEntity.directionAngle + step) & 0xfff);
+                s_quickTurnLeft -= step;
+
+                // Standing still: step the feet with the turn-on-the-spot
+                // animation (player_ctrl_behavior_back's attackAnim 2), at
+                // double speed to match the faster swing. With a direction
+                // held the normal walk/turn behaviour animates instead.
+                if ((g_PlayerDpadHeld & 0x0f) == 0 && g_playerEntity.action_behavior == 0) {
+                    if (starting) {
+                        g_playerEntity.animation_frame_id  = 0;
+                        g_playerEntity.unk_bf              = 0;
+                        g_playerEntity.move_speed_current  = 1;
+                        g_playerEntity.attackAnim          = 2;
+                        g_playerEntity.unk_8c              = 3;
+                        g_playerEntity.isBeingAttackedFlag = 0;
+                        player_footstep_snd(0);
+                    }
+                    Joint_move(0, g_playerEntity.jointMoveData0, g_playerEntity.jointMoveData1, 0x400);
+                    Joint_move(0, g_playerEntity.jointMoveData0, g_playerEntity.jointMoveData1, 0x400);
+                    if (s_quickTurnLeft == 0) {
+                        player_footstep_snd(-4);
+                        g_playerEntity.action_state = 0;   // idle re-settles
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     // 0x0049523d: dispatch on animFrameId.
@@ -4024,6 +4146,20 @@ static char weapon_fire_check(void)
     return (char)(get_item_slot(weapon_ammo_item_id(g_playerEntity.equippedWeaponId)) + 1);
 }
 
+// Mod: RELOAD pressed, for a gun that has a reload (the handguns, shotgun and
+// magnums - ids 2-5, the same set the empty-click reload serves), with ammo in
+// the inventory and room in the magazine.
+static int manual_reload_wanted(void)
+{
+    if (!g_bReloadButton || (g_PlayerPadPressed & 0x40000) == 0) return 0;
+    const unsigned char w = (unsigned char)g_playerEntity.equippedWeaponId;
+    if (w < 2 || w >= 6 || g_EquippedItemId == 0) return 0;
+    if (weapon_fire_check() == 0) return 0;
+    const unsigned char cur = (unsigned char)(((unsigned char*)g_ItemSlotsPointer)[g_EquippedItemId * 2 - 1] & 0x7f);
+    const unsigned char maxQty = g_ItemMaxQty[(unsigned int)weapon_ammo_item_id(w) * 4];
+    return cur < maxQty;
+}
+
 // ============================================================================
 // player_aim_cone_test @ 0x00496be0
 // Does the ray from the player through `delta` cross a sight-blocking room
@@ -4542,6 +4678,14 @@ static void player_behavior_13_gun_hold_input(void)
     // Aim button released -> holster.
     if ((g_PlayerDpadHeld & 0x100) == 0) {
         g_playerEntity.action_behavior = 0x17;
+        g_playerEntity.action_state = 0;
+        return;
+    }
+
+    // Mod: RELOAD while raised.
+    if (manual_reload_wanted()) {
+        s_manualReload = 1;
+        g_playerEntity.action_behavior = 0x18;
         g_playerEntity.action_state = 0;
         return;
     }
@@ -5190,6 +5334,22 @@ static void fire_consume_ammo_stack(void)
             bestSlot = i;
             bestQty = qty;
         }
+    }
+    // Mod: a manual RELOAD tops the magazine up, keeping the rounds left in it.
+    if (s_manualReload) {
+        s_manualReload = 0;
+        unsigned char* gun = &((unsigned char*)g_ItemSlotsPointer)[g_EquippedItemId * 2 - 1];
+        const unsigned char cur = (unsigned char)(*gun & 0x7f);
+        if (bestQty == 0 || cur >= maxQty) { *gun = cur; return; }
+        const unsigned char take = (unsigned char)((maxQty - cur < bestQty) ? (maxQty - cur) : bestQty);
+        *gun = (unsigned char)(cur + take);
+        if (bestQty > take) {
+            ((unsigned char*)g_ItemSlotsPointer)[bestSlot * 2 + 1] = (unsigned char)(bestQty - take);
+        } else {
+            ((unsigned char*)g_ItemSlotsPointer)[bestSlot * 2] = 0;
+            rearrange_item_slots();
+        }
+        return;
     }
     if (maxQty < bestQty) {
         ((unsigned char*)g_ItemSlotsPointer)[g_EquippedItemId * 2 - 1] = maxQty;
@@ -7039,6 +7199,14 @@ int open_itembox(unsigned char* entry)
 // ============================================================================
 int create_room_event(unsigned char* entry)
 {
+    // Mod: the wardrobe's Saturn closet is room action slot 3 (RoomInit.cpp).
+    {
+        extern int g_wardrobeSaturnPending;
+        extern unsigned char g_RoomActionTable[288];
+        if (!g_bDcMode && room_file_stage() == 0 && g_roomId == 0x1C) {
+            g_wardrobeSaturnPending = (entry == &g_RoomActionTable[3 * 0xc]);
+        }
+    }
     ScdEventEntry_Create(*(unsigned char*)(entry + 2), *(unsigned char*)(entry + 4));
     return 0;
 }

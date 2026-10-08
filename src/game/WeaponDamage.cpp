@@ -360,6 +360,15 @@ unsigned char apply_weapon_damage(unsigned int weapon_id)
         idx--;
         Entity* candidate = &g_EnemiesList[activeIdx[0]];
 
+        if (candidate->id == 0x0C || candidate->id == 0x10) {   // DIAG: Man Spider shots
+            extern void crashlog_mark(const char* step);
+            char m[160];
+            // (no second detector call: it updates the nearest-hit distance, so
+            //  calling it twice made the real test always fail)
+            sprintf(m, "shot w%d sf%02x pf%02x hs%d rng%d", weaponAdj, candidate->status_flags,
+                    g_playerEntityPointer.flags, candidate->hit_state, (int)wpnRange);
+            crashlog_mark(m);
+        }
         if ((candidate->status_flags & g_playerEntityPointer.flags & 0xE0) != 0
             && candidate->hit_state == 0)
         {
@@ -372,7 +381,30 @@ unsigned char apply_weapon_damage(unsigned int weapon_id)
         activeIdx[0] = activeIdx[idx];
     }
 
-    if (enemy == NULL || (check_weapon_line_of_sight((VECTOR*)enemy->scaMatrixData.localMatrix.t) && weaponAdj < 5)) {
+    if (enemy != NULL && (enemy->id == 0x0C || enemy->id == 0x10)) {   // DIAG
+        extern void crashlog_mark(const char* step);
+        char m[128];
+        VECTOR body = *(VECTOR*)enemy->scaMatrixData.localMatrix.t;
+        int losFeet = check_weapon_line_of_sight((VECTOR*)enemy->scaMatrixData.localMatrix.t);
+        body.y -= 900;
+        int losBody = check_weapon_line_of_sight(&body);
+        sprintf(m, "shot los feet%d body%d y%d hp%d", losFeet, losBody,
+                (int)enemy->scaMatrixData.localMatrix.t[1], (int)enemy->health);
+        crashlog_mark(m);
+    }
+    extern int battle_man_spider_active(void);
+    VECTOR losPos;
+    if (enemy != NULL) {
+        losPos = *(VECTOR*)enemy->scaMatrixData.localMatrix.t;
+        // Mod: the Man Spider sits on the floor; test the sight line to his
+        // body, not to the floor point under him (lab consoles block that).
+        if ((enemy->id == 0x0C || enemy->id == 0x10) && battle_man_spider_active()) losPos.y -= 900;
+    }
+    {
+        extern void crashlog_mark(const char* step);
+        crashlog_mark(enemy ? "shot -> enemy picked" : "shot -> no enemy");
+    }
+    if (enemy == NULL || (check_weapon_line_of_sight(&losPos) && weaponAdj < 5)) {
         return 0;
     }
 

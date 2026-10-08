@@ -20,6 +20,15 @@
 #include <cstring>
 #include <cstdio>
 #include "../system/AssetPath.h"
+#include "../system/ConfigFile.h"   // Mod: bindings save to config.ini
+
+// Mod: the title screen's OPTIONS > CONTROLS opens this menu (VideoMenu.cpp,
+// title_options_state). At the title no player model, weapon animation or room
+// is loaded, so while this is set the background character demo is skipped and
+// the exit leaves the (absent) room alone; the key / joypad configuration
+// itself is unchanged.
+int g_optFromTitle = 0;
+int g_optMenuActive = 0;   // Mod: 1 while Option Mode runs (InputSystem.cpp)
 
 // ============================================================================
 // Forward declarations for unimplemented functions
@@ -42,7 +51,7 @@ extern void menu_update_equipped_weapon(void); // 0x00463ec0 in MainMenu.cpp
 // rates.
 // ============================================================================
 static unsigned char g_nOptKeyScanResult = 0;   // 0x00ac4020
-static const unsigned char g_abOptKeyScanTable[67] = {   // 0x004d46e8
+static const unsigned char g_abOptKeyScanTable[75] = {   // 0x004d46e8 (+ mod: Tab, Shift, Alt, mouse)
     0x0d, 0x20, 0x11, 0x1b,                         // Enter, Space, Ctrl, Esc
     0x25, 0x26, 0x27, 0x28,                         // arrows
     0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,  // 0-9
@@ -54,12 +63,17 @@ static const unsigned char g_abOptKeyScanTable[67] = {   // 0x004d46e8
     0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0,       // ; = , - . / `
     0xdb, 0xdc, 0xdd, 0xde,                         // [ \ ] '
     0xe2,                                           // OEM 102
+    // Mod: mouse buttons (last, so a key wins a tie): left, right, and the
+    // middle button and the two side buttons (XBUTTON1/2 - mouse 4 and 5). GetAsyncKeyState reads
+    // them like keys, so a binding to one works in play unchanged.
+    0x09, 0x10, 0x12,                   // mod: Tab, Shift, Alt
+    0x01, 0x02, 0x04, 0x05, 0x06,       // M1 M2 M3(middle) M4 M5
 };
 
 unsigned char FUN_00497de0(void)
 {
     g_nOptKeyScanResult = 0;
-    for (int i = 0; i < 67; i++) {
+    for (int i = 0; i < 75; i++) {
         SHORT state = plat_key_state((int)g_abOptKeyScanTable[i]);
         if ((state & 0x8000) != 0 && (state & 1) == 0) {
             g_nOptKeyScanResult = g_abOptKeyScanTable[i];
@@ -205,8 +219,11 @@ static const int* const* const PTR_PTR_004c04a8[2] = { s_optJoyAnimTbl_Chris, s_
 static const int* const     PTR_DAT_004c0538[2] = { s_optJoyAnimLen_Chris, s_optJoyAnimLen_Jill };
 
 // File path strings for options menu backgrounds
-static const char s_optBgKeyConfig[]  = GAME_DATA_ROOT "data\\Jopt06.tim";  // 0x004c4400
-static const char s_optBgDisplayCfg[] = GAME_DATA_ROOT "data\\Opt11.tim";   // 0x004c43c8
+// Mod: Jopt06m / Opt11m are Jopt06 / Opt11 with the tabs redrawn - VIDEO |
+// SOUND in place of the SideWinder bar, GAME PAD for JOY PAD
+// (tools/option_tabs.py).
+static const char s_optBgKeyConfig[]  = GAME_DATA_ROOT "data\\Jopt06m.tim"; // 0x004c4400
+static const char s_optBgDisplayCfg[] = GAME_DATA_ROOT "data\\Opt11m.tim";  // 0x004c43c8
 static const char s_optBgJoystick[]   = GAME_DATA_ROOT "data\\Side06.tim";  // 0x004c43e4
 
 // Options menu light data (3 lights × 16 bytes each)
@@ -237,6 +254,22 @@ static char   s_optMainState;          // 0x00ac9e70 - 0-5 state machine
 static char   s_optSubInitState;       // 0x00ac9e71 - 0=init, 1=active, other=return
 static char   s_optSubSubState;        // 0x00ac9e72 - sub-sub-menu state
 static char   s_optCursorPos;          // 0x00ac9e73 - cursor position 0-2
+static char   s_optTopPos;             // Mod: top row, 0 = VIDEO, 1 = SOUND
+static int    s_optQuitSel;            // Mod: QUIT confirm, 0 = YES, 1 = NO
+extern int    OptConfirm_Update(int* sel);
+extern void   OptConfirm_Open(void);
+static int    s_optNavHold;            // Mod: frames to ignore input after a tab
+
+// Mod: the VIDEO / SOUND tabs (settings live in VideoMenu.cpp).
+extern int         OptTab_RowCount(int tab);
+extern int         OptTab_Cursor(void);
+extern void        OptTab_Open(int tab);
+extern const char* OptTab_Label(int tab, int row);
+extern void        OptTab_Value(int tab, int row, char* out, int size);
+extern int         OptTab_Update(int tab);
+#define OPT_TAB_VIDEO 3                 // s_optCurrentTab values
+#define OPT_TAB_SOUND 4
+#define OPT_TAB_GAMEPLAY 5
 static unsigned char  s_optRepeatTimer;   // 0x00ac9e79
 static unsigned short s_optPrevButtons;   // 0x00ac9e7a
 
@@ -267,10 +300,13 @@ static int    s_optCursorIndex;       // 0x00bcb2e8
 static int    s_optAcceptButtonMask;  // 0x00bcb2ec
 static int    s_optDebounceTimer;     // 0x00bcb2f0
 static int    s_optCancelKeyVK;       // 0x00bcb2f4
-static KeyBindEntry s_optTempEntries[9]; // 0x00bcb300
+// Mod: 14 entries - 10 keyboard rows (QUICK TURN is the 10th, the GAME PAD
+// tab uses 6) and room for the handlers' writes at +0x108 / +0x10C, which ran
+// past the original 9.
+static KeyBindEntry s_optTempEntries[14]; // 0x00bcb300
 static int    s_optWalkAnimTrigger;   // 0x00bcb3b4
 static int    s_optAnimFrameCounter;  // 0x00bcb3b8
-static int    s_optCursorHighlight[11]; // 0x00bcb3c0 (44 bytes, 11 ints)
+static int    s_optCursorHighlight[16]; // 0x00bcb3c0 (mod: 16 ints - twelve keyboard rows)
 static unsigned char s_optKeyScanResult;   // 0x00bcb3ec
 static int    s_optJoyLabelYOffset;   // 0x00bcb3f0 - joypad tab label Y offset
                                      // (read at 0x00453303, never written: always 0)
@@ -300,10 +336,32 @@ static int    s_optDefaultSensIdx;    // 0x008e1c34
 // ============================================================================
 
 // Y positions for key config labels (5 entries, 0x004c43a8)
-static const int s_optKeyLabelY[5] = {34, 75, 119, 161, 204}; // 0x004c43a8
+// Mod: eight rows on Jopt06m (QUICK TURN, QUICK KNIFE, RELOAD added), 26 px apart.
+static const int s_optKeyLabelY[8] = {23, 49, 75, 101, 127, 153, 179, 205}; // 0x004c43a8
 
 // Y positions for display config labels (10 entries, 0x004c4380)
-static const int s_optDisplayLabelY[10] = {25, 45, 65, 90, 110, 130, 150, 178, 204, 0}; // 0x004c4380
+// Mod: Opt11m's column moved up 19 px, its last two groups merged, and two
+// rows added (QUICK TURN, QUICK KNIFE).
+// (RELOAD: twelve 18 px squares in groups of 3 / 4 / 5.)
+static const int s_optDisplayLabelY[12] = {7, 25, 43, 67, 85, 103, 121, 146, 164, 182, 200, 218}; // 0x004c4380
+
+// Mod: QUICK TURN - its own pad-word bit (unused by the PS1 layout), fed by
+// keyboard slot 26 (g_JoyRemapTbl[0][26], Globals.cpp) and by whichever pad
+// button the GAME PAD tab binds to it (g_JoyRemapTbl[1]).
+#define OPT_QUICKTURN_BIT 0x10000
+static constexpr auto s_optText_QuickTurnMod = STR("QUICK TURN");
+static KeyBindEntry s_qtKeyDisplay;     // keyboard binding, for the idle screen
+static KeyBindEntry s_qtJoyDisplay;     // pad binding, for the idle screen
+// Mod: QUICK KNIFE - the same scheme, bit 0x20000, keyboard slot 25.
+#define OPT_QUICKKNIFE_BIT 0x20000
+static constexpr auto s_optText_QuickKnifeMod = STR("QUICK KNIFE");
+static KeyBindEntry s_qkKeyDisplay;
+static KeyBindEntry s_qkJoyDisplay;
+// Mod: RELOAD - bit 0x40000, keyboard slot 24.
+#define OPT_RELOAD_BIT 0x40000
+static constexpr auto s_optText_ReloadMod = STR("RELOAD");
+static KeyBindEntry s_rlKeyDisplay;
+static KeyBindEntry s_rlJoyDisplay;
 
 // The button-scan state machines below treat any change in the pad word as a
 // button event, and search bits 8-15 for the button that was pressed. Bits 0-7
@@ -351,6 +409,42 @@ static constexpr auto s_joyBtnText_NotUsed  = STR("NOT USED");   // 0x004c0570
 
 // sprintf format strings
 static const char s_fmt_c[] = "%c";   // 0x004c05c4
+
+// Mod: a pad binding as an Xbox-style name (the XInput backend's button order,
+// MarniXInput.h: buttons 1-12 = A B X Y LB RB BACK START LS RS LT RT). Stick /
+// D-pad directions keep their arrow glyphs.
+static void opt_pad_sprintf(int entry)
+{
+    static const char* const kXbox[12] = {
+        "A", "B", "X", "Y", "LB", "RB", "BK", "ST", "LS", "RS", "LT", "RT" };
+    options_map_key_to_print_index(entry);
+    const int idx = *(int*)((unsigned char*)entry + 4);
+    if (idx >= 8 && idx < 20) {
+        sprintf(PRINT_TEXT_BUFFER, "%s", kXbox[idx - 8]);
+    } else {
+        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)((unsigned char*)entry)[1]);
+    }
+}
+
+// Mod: a bound key's own character, or M1 / M2 / M4 / M5 for mouse buttons.
+static void opt_vk_sprintf(unsigned char vk)
+{
+    switch (vk) {
+    case 0x01: sprintf(PRINT_TEXT_BUFFER, "M1"); return;
+    case 0x02: sprintf(PRINT_TEXT_BUFFER, "M2"); return;
+    case 0x04: sprintf(PRINT_TEXT_BUFFER, "M3"); return;
+    case 0x09: sprintf(PRINT_TEXT_BUFFER, "TB"); return;   // Tab
+    case 0x0d: sprintf(PRINT_TEXT_BUFFER, "EN"); return;   // Enter
+    case 0x20: sprintf(PRINT_TEXT_BUFFER, "SP"); return;   // Space
+    case 0x11: sprintf(PRINT_TEXT_BUFFER, "CT"); return;   // Ctrl
+    case 0x12: sprintf(PRINT_TEXT_BUFFER, "AL"); return;   // Alt
+    case 0x1b: sprintf(PRINT_TEXT_BUFFER, "ES"); return;   // Escape
+    case 0x10: sprintf(PRINT_TEXT_BUFFER, "SH"); return;   // Shift
+    case 0x05: sprintf(PRINT_TEXT_BUFFER, "M4"); return;
+    case 0x06: sprintf(PRINT_TEXT_BUFFER, "M5"); return;
+    }
+    sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)vk);
+}
 static const char s_fmt_plus[] = "+"; // 0x004c05c0
 
 
@@ -627,6 +721,22 @@ void options_init_keybind_display(void)
         i--;
     } while (i != 0);
 
+    s_qtKeyDisplay.vkCode = 0x5f;
+    s_qtKeyDisplay.displayChar = s_qtKeyDisplay.symbolChar = 0xff;
+    s_qtKeyDisplay.keyIndex = -1;
+    s_qtJoyDisplay = s_qtKeyDisplay;
+    s_qkKeyDisplay = s_qtKeyDisplay;
+    s_qkJoyDisplay = s_qtKeyDisplay;
+    s_rlKeyDisplay = s_qtKeyDisplay;
+    s_rlJoyDisplay = s_qtKeyDisplay;
+
+    // Mod: the QUICK TURN / QUICK KNIFE / RELOAD keyboard slots (26/25/24).
+    // An older save restored the whole keyboard table and blanked them, which
+    // left those rows unbound and let edits to them land on slot 0.
+    g_JoyRemapTbl[0][24] = OPT_RELOAD_BIT;
+    g_JoyRemapTbl[0][25] = OPT_QUICKKNIFE_BIT;
+    g_JoyRemapTbl[0][26] = OPT_QUICKTURN_BIT;
+
     // Scan keyboard binding table (g_keyBindingData[0..27] with g_JoyRemapTbl[0])
     const unsigned int* remapTbl = (const unsigned int*)(g_JoyRemapTbl[0] + 0x1b);
     i = 0x1b;
@@ -669,6 +779,18 @@ void options_init_keybind_display(void)
         else if (btnMask == 0x900) {   // L1+R1 combo (QUICK TURN)
             s_keyBindDisplay[8].vkCode = g_keyBindingData[i];
             s_keyBindDisplay[8].keyIndex = i;
+        }
+        else if (btnMask == OPT_QUICKTURN_BIT) {   // Mod: QUICK TURN
+            s_qtKeyDisplay.vkCode = g_keyBindingData[i];
+            s_qtKeyDisplay.keyIndex = i;
+        }
+        else if (btnMask == OPT_QUICKKNIFE_BIT) {  // Mod: QUICK KNIFE
+            s_qkKeyDisplay.vkCode = g_keyBindingData[i];
+            s_qkKeyDisplay.keyIndex = i;
+        }
+        else if (btnMask == OPT_RELOAD_BIT) {      // Mod: RELOAD
+            s_rlKeyDisplay.vkCode = g_keyBindingData[i];
+            s_rlKeyDisplay.keyIndex = i;
         }
         remapTbl--;
         i--;
@@ -730,6 +852,15 @@ void options_init_keybind_display(void)
             s_keyBindDisplay[17].vkCode = 0x900;   // 0x00ac9e60
             s_keyBindDisplay[17].keyIndex = i;     // 0x00ac9e58
         }
+        else if (joyVal == OPT_QUICKTURN_BIT) {   // Mod
+            s_qtJoyDisplay.keyIndex = i;
+        }
+        else if (joyVal == OPT_QUICKKNIFE_BIT) {  // Mod
+            s_qkJoyDisplay.keyIndex = i;
+        }
+        else if (joyVal == OPT_RELOAD_BIT) {      // Mod
+            s_rlJoyDisplay.keyIndex = i;
+        }
     }
 }
 
@@ -740,49 +871,78 @@ void options_init_keybind_display(void)
 // ============================================================================
 void options_render_cursor(void)
 {
-    // X positions for 3 cursor positions in key config mode
-    int cursorXPositions[3];
-    cursorXPositions[0] = -0x95;   // -149
-    cursorXPositions[1] = -0x6e;   // -110
-    cursorXPositions[2] = -0x46;   // -70
-
-    // Texture U offsets for each cursor position
-    unsigned char texUOffsets[12];
-    texUOffsets[0] = 3;   texUOffsets[1] = 0; texUOffsets[2] = 0; texUOffsets[3] = 0;
-    texUOffsets[4] = 0x2a; texUOffsets[5] = 0; texUOffsets[6] = 0; texUOffsets[7] = 0;
-    texUOffsets[8] = 0x52; texUOffsets[9] = 0; texUOffsets[10] = 0; texUOffsets[11] = 0;
-
-    g_TextureDesc.flags = 0x01000040;
-
-    if (s_optUseJoystickMode == 0) {
-        g_TextureDesc.screenX = (short)cursorXPositions[(unsigned char)s_optCursorPos];
+    // Mod: the tab art was redrawn (VIDEO | SOUND over GAME PAD | KEYBOARD |
+    // EXIT), so the original lit-button sprite no longer matches it; light
+    // the selected button with a translucent white box instead.
+    static RectDrawDesc hl;
+    int x, y, w;
+    if (s_optMainState == 9) return;    // Mod: QUIT confirm has its own cursor
+    // Rows (Jopt06m / Opt11m), 12 px each from y 17: EXIT, VIDEO | SOUND,
+    // GAME PAD | KEYBOARD, GAMEPLAY, QUIT GAME.
+    x = 12; w = 115;
+    switch (s_optUseJoystickMode) {
+    case 3:  y = 17; break;                                         // EXIT
+    case 1:  y = 29; x = s_optTopPos ? 71 : 12; w = 55; break;      // VIDEO | SOUND
+    case 0:  y = 41; x = (s_optCursorPos & 1) ? 71 : 12; w = 55; break; // PAD | KEYBOARD
+    case 2:  y = 53; break;                                         // GAMEPLAY
+    default: y = 65; break;                                         // QUIT GAME
     }
-    else {
-        g_TextureDesc.screenX = -0x95;
-    }
+    y += 1;
+    hl.textureId = 0x40000000;          // variant 1: translucent tint
+    hl.x = (short)(x - g_ScreenOffsetX);
+    hl.y = (short)(y - g_ScreenOffsetY);
+    hl.w = (short)w;
+    hl.h = 10;
+    hl.r = hl.g = hl.b = 112;           // white, alpha 112
+    draw_rect(&hl, 100, 1);
+}
 
-    g_TextureDesc.height = 0xc;
-    g_TextureDesc.texturePage = 2;
-    g_TextureDesc.screenY = (short)(s_optUseJoystickMode * -0xe + -0x4b);
-    g_TextureDesc.width = (unsigned short)(s_optUseJoystickMode * 0x4f + 0x25);
-    g_TextureDesc.colorMulR = 0x80;
-    g_TextureDesc.colorMulG = 0x80;
-    g_TextureDesc.clutY = 0x1e0;
-    g_TextureDesc.colorMulB = 0x80;
-    g_TextureDesc.pivotX = 0;
-    unk_00be1180 = 0;
-    g_TextureDesc.pivotY = 0;
-    g_TextureDesc.clutX = 0;
+// Mod: print plain ASCII in the screen's 8x14 font (PrintFormattedText), the
+// run-time counterpart of STR().
+static void opt_print(int x, int y, unsigned char color, const char* text)
+{
+    static unsigned char bufs[16][40];
+    static int next = 0;
+    unsigned char* b = bufs[next++ & 15];
+    int n = 0;
+    while (*text && n < 37) b[n++] = ::pft_detail::encodeChar((unsigned char)*text++);
+    b[n++] = 0x01;
+    b[n] = 0;
+    PrintFormattedText((short)x, (short)y, color, b);
+}
 
-    if (s_optUseJoystickMode == 0) {
-        g_TextureDesc.texU = texUOffsets[(unsigned char)s_optCursorPos * 4];
+// Mod: one keyboard binding in the KEYBOARD tab's style - a controller glyph
+// for keys that have one (arrows etc.), else the key's own character.
+static void options_print_key_row(KeyBindEntry* e, int y, unsigned char color)
+{
+    options_map_vk_to_controller_symbol((unsigned char*)e);
+    const unsigned char sym = e->symbolChar;
+    if (sym == 0xff || sym == 0xbc || sym == 0xbf) {
+        opt_vk_sprintf((unsigned char)e->vkCode);
+        PrintText8x14((short)(s_optDisplayXOffset + 0x91), (short)(y + s_optDisplayYOffset + 1), color, 0);
+    } else {
+        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(short)sym);
+        options_print_14x14((short)(s_optDisplayXOffset + 0x8e), (short)(y + s_optDisplayYOffset + 1), color, 0);
     }
-    else {
-        g_TextureDesc.texU = 3;
-    }
-    g_TextureDesc.texV = (unsigned char)(s_optUseJoystickMode * 0x10 + 4);
+}
 
-    display_texture(&g_TextureDesc, 0, 0xb, 1);
+// Mod: the VIDEO (Opt11m, nine rows) and SOUND (Jopt06m, five rows) tabs:
+// labels where the control names go, values right-aligned.
+static void options_render_settings_tab(int tab, int active)
+{
+    static const int kVideoRow[7] = { 0, 1, 2, 3, 4, 5, 7 };  // into s_optDisplayLabelY
+    char value[32];
+    const int rows = OptTab_RowCount(tab - OPT_TAB_VIDEO);
+    for (int row = 0; row < rows; row++) {
+        const int t = tab - OPT_TAB_VIDEO;     // 0 video, 1 sound, 2 gameplay
+        const int y = (t == 0) ? s_optDisplayLabelY[kVideoRow[row]] : s_optKeyLabelY[row];
+        const unsigned char col = (active && row == OptTab_Cursor()) ? 1 : 0;
+        opt_print(0xa2, y, col, OptTab_Label(t, row));
+        OptTab_Value(t, row, value, sizeof(value));
+        if (value[0]) {
+            opt_print(314 - (int)strlen(value) * 8, y, col, value);
+        }
+    }
 }
 
 
@@ -871,7 +1031,17 @@ checkSwitchZone:
 // ============================================================================
 void options_menu_render(void)
 {
-    if (s_optCurrentTab == 0) {
+    if (s_optMainState == 9) {
+        // Mod: QUIT GAME confirm.
+        opt_print(0xb4, 96, 0, "QUIT TO TITLE?");
+        opt_print(0xb4, 120, s_optQuitSel == 0 ? 1 : 0, "YES");
+        opt_print(0xf0, 120, s_optQuitSel == 1 ? 1 : 0, "NO");
+    }
+    else if (s_optCurrentTab >= OPT_TAB_VIDEO) {
+        // Mod: VIDEO / SOUND - rows lit while the tab is being edited.
+        options_render_settings_tab(s_optCurrentTab, s_optMainState >= 6 && s_optMainState <= 8);
+    }
+    else if (s_optCurrentTab == 0) {
         // Tab 0: Key config mode - show joystick bindings (entries 9-11)
         // 0x00ac9db4 = s_keyBindDisplay[9] (joystick ACTION)
         unsigned char* pEntry = (unsigned char*)&s_keyBindDisplay[9];
@@ -879,21 +1049,18 @@ void options_menu_render(void)
 
         do {
             KeyBindEntry* next = (KeyBindEntry*)(pEntry + 0x14);
-            options_map_key_to_print_index((int)pEntry);
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)pEntry[1]);
+            opt_pad_sprintf((int)pEntry);
             PrintText8x14(0x91, (short)(*pY + 1), 0, 0);
             pEntry = (unsigned char*)next;
             pY++;
         } while (pEntry < (unsigned char*)&s_keyBindDisplay[12]); // entries 9,10,11
 
         // Accept key (entry 16) at Y[3]
-        options_map_key_to_print_index((int)&s_keyBindDisplay[16]);
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[16].displayChar);
+        opt_pad_sprintf((int)&s_keyBindDisplay[16]);
         PrintText8x14(0x91, (short)(s_optKeyLabelY[3] + 1), 0, 0);
 
         // Cancel key (entry 17) at Y[4]
-        options_map_key_to_print_index((int)&s_keyBindDisplay[17]);
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[17].displayChar);
+        opt_pad_sprintf((int)&s_keyBindDisplay[17]);
         PrintText8x14(0x91, (short)(s_optKeyLabelY[4] + 1), 0, 0);
 
         // Action labels
@@ -902,6 +1069,21 @@ void options_menu_render(void)
         PrintFormattedText(0xa2, s_optKeyLabelY[2], 0, s_optLabelText_Start);
         PrintFormattedText(0xa2, s_optKeyLabelY[3], 0, s_optLabelText_QuickTurn);
         PrintFormattedText(0xa2, s_optKeyLabelY[4], 0, s_optLabelText_Map);
+
+        // Mod: QUICK TURN
+        opt_pad_sprintf((int)&s_qtJoyDisplay);
+        PrintText8x14(0x91, (short)(s_optKeyLabelY[5] + 1), 0, 0);
+        PrintFormattedText(0xa2, s_optKeyLabelY[5], 0, s_optText_QuickTurnMod);
+
+        // Mod: QUICK KNIFE
+        opt_pad_sprintf((int)&s_qkJoyDisplay);
+        PrintText8x14(0x91, (short)(s_optKeyLabelY[6] + 1), 0, 0);
+        PrintFormattedText(0xa2, s_optKeyLabelY[6], 0, s_optText_QuickKnifeMod);
+
+        // Mod: RELOAD
+        opt_pad_sprintf((int)&s_rlJoyDisplay);
+        PrintText8x14(0x91, (short)(s_optKeyLabelY[7] + 1), 0, 0);
+        PrintFormattedText(0xa2, s_optKeyLabelY[7], 0, s_optText_ReloadMod);
     }
     else if (s_optCurrentTab == 1) {
         // Tab 1: Display config (keyboard D-pad)
@@ -911,7 +1093,7 @@ void options_menu_render(void)
         do {
             options_map_vk_to_controller_symbol(pEntry - 2);
             if ((*pEntry == 0xff) || ((short)*pEntry == 0xbc) || ((short)*pEntry == 0xbf)) {
-                sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)pEntry[-2]);
+                opt_vk_sprintf((unsigned char)pEntry[-2]);
                 PrintText8x14((short)(s_optDisplayXOffset + 0x91),
                     (short)(*pY + s_optDisplayYOffset + 1), 0, 0);
             }
@@ -927,7 +1109,7 @@ void options_menu_render(void)
         // Render current/up/down/left/right column labels
         options_map_vk_to_font_index((unsigned char*)&s_keyBindDisplay[0]);
         if (s_keyBindDisplay[0].displayChar == 0xff) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[0].vkCode);
+            opt_vk_sprintf((unsigned char)s_keyBindDisplay[0].vkCode);
             PrintText8x8(0x130, (short)(s_optDisplayLabelY[0] + 6), 0, '\0');
         }
         else {
@@ -937,7 +1119,7 @@ void options_menu_render(void)
 
         options_map_vk_to_font_index((unsigned char*)&s_keyBindDisplay[1]);
         if (s_keyBindDisplay[1].displayChar == 0xff) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[1].vkCode);
+            opt_vk_sprintf((unsigned char)s_keyBindDisplay[1].vkCode);
             PrintText8x8(0x120, (short)(s_optDisplayLabelY[1] + 6), 0, '\0');
         }
         else {
@@ -948,7 +1130,7 @@ void options_menu_render(void)
         // START key
         options_map_vk_to_font_index((unsigned char*)&s_keyBindDisplay[2]);
         if (s_keyBindDisplay[2].displayChar == 0xff) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[2].vkCode);
+            opt_vk_sprintf((unsigned char)s_keyBindDisplay[2].vkCode);
             PrintText8x8(0x120, (short)(s_optDisplayLabelY[0] + 6), 0, '\0');
             PrintText8x8(0x120, (short)(s_optDisplayLabelY[3] + 6), 0, '\0');
             PrintText8x8(0x120, (short)(s_optDisplayLabelY[4] + 6), 0, '\0');
@@ -963,7 +1145,7 @@ void options_menu_render(void)
         // L1
         options_map_vk_to_font_index((unsigned char*)&s_keyBindDisplay[3]);
         if (s_keyBindDisplay[3].displayChar == 0xff) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[3].vkCode);
+            opt_vk_sprintf((unsigned char)s_keyBindDisplay[3].vkCode);
             PrintText8x8(0x130, (short)(s_optDisplayLabelY[1] + 6), 0, '\0');
             PrintText8x8(0x130, (short)(s_optDisplayLabelY[3] + 6), 0, '\0');
         }
@@ -976,7 +1158,7 @@ void options_menu_render(void)
         // R1
         options_map_vk_to_font_index((unsigned char*)&s_keyBindDisplay[4]);
         if (s_keyBindDisplay[4].displayChar == 0xff) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)s_keyBindDisplay[4].vkCode);
+            opt_vk_sprintf((unsigned char)s_keyBindDisplay[4].vkCode);
             PrintText8x8(0x130, (short)(s_optDisplayLabelY[4] + 6), 0, '\0');
         }
         else {
@@ -1001,6 +1183,18 @@ void options_menu_render(void)
         PrintFormattedText(0xa2, s_optDisplayLabelY[6], 0, s_optLabelText_Aim);
         PrintFormattedText(0xa2, s_optDisplayLabelY[7], 0, s_optLabelText_QuickTurn);
         PrintFormattedText(0xa2, s_optDisplayLabelY[8], 0, s_optLabelText_Map);
+
+        // Mod: QUICK TURN
+        options_print_key_row(&s_qtKeyDisplay, s_optDisplayLabelY[9], 0);
+        PrintFormattedText(0xa2, s_optDisplayLabelY[9], 0, s_optText_QuickTurnMod);
+
+        // Mod: QUICK KNIFE
+        options_print_key_row(&s_qkKeyDisplay, s_optDisplayLabelY[10], 0);
+        PrintFormattedText(0xa2, s_optDisplayLabelY[10], 0, s_optText_QuickKnifeMod);
+
+        // Mod: RELOAD
+        options_print_key_row(&s_rlKeyDisplay, s_optDisplayLabelY[11], 0);
+        PrintFormattedText(0xa2, s_optDisplayLabelY[11], 0, s_optText_ReloadMod);
     }
 
     // Render player model animation.
@@ -1011,13 +1205,15 @@ void options_menu_render(void)
     // inherits a non-zero value from gameplay; our room code does not always
     // maintain it, and with it clear every joint gets filtered out (the options
     // menu has no RDT zone data to fall back on), so force it here.
-    g_playerEntity.zoneFlags = 1;
-    ENTITY = (Entity*)&g_playerEntity;
-    g_playerEntity.attackAnim = 1; // 0xbd
-    Joint_move(0, g_playerEntity.jointMoveData0, g_playerEntity.jointMoveData1, 0x400);
-    EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
-    EntityApplyLookAtRotation();
-    options_render_entity((int)&g_playerEntity);
+    if (!g_optFromTitle) {      // Mod: no player model at the title
+        g_playerEntity.zoneFlags = 1;
+        ENTITY = (Entity*)&g_playerEntity;
+        g_playerEntity.attackAnim = 1; // 0xbd
+        Joint_move(0, g_playerEntity.jointMoveData0, g_playerEntity.jointMoveData1, 0x400);
+        EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
+        EntityApplyLookAtRotation();
+        options_render_entity((int)&g_playerEntity);
+    }
     options_render_cursor();
 }
 
@@ -1078,7 +1274,7 @@ unsigned int options_display_config_handler(void)
 
         // Clear cursor highlights
         unsigned int* pHL = (unsigned int*)&s_optCursorHighlight[0];
-        for (i = 0xb; i != 0; i--) {
+        for (i = 0x10; i != 0; i--) {
             *pHL = 0;
             pHL++;
         }
@@ -1093,7 +1289,7 @@ unsigned int options_display_config_handler(void)
             *(int*)(pTmp + 8) = 0;
             *(int*)(pTmp + 0x10) = 0;
             pTmp += 0x14;
-        } while (pTmp < (unsigned char*)&s_optTempEntries[9]);
+        } while (pTmp < (unsigned char*)&s_optTempEntries[12]);   // Mod: 12 rows
 
         // Set up player entity for display
         ENTITY = (Entity*)&g_playerEntity;
@@ -1131,8 +1327,13 @@ unsigned int options_display_config_handler(void)
         unsigned char* pVk = (unsigned char*)(pBind - 1);
         int idx = *pBind;
         pBind += 5; // 0x14 / 4 = 5 ints per entry
+        // Mod: only rows the populate step actually filled. A cleared row is
+        // '_' with keyIndex 0, and copying it wrote '_' over slot 0 (the UP
+        // key) - and the whole table back when the handler exited before
+        // populating (the pad-button exit path skips the input step).
+        if (idx < 0 || idx >= 32 || *pVk == 0x5f) continue;
         g_keyBindingData[idx] = *pVk;
-    } while (pBind < &s_optTempEntries[9].keyIndex);
+    } while (pBind < &s_optTempEntries[12].keyIndex);     // Mod: 12 rows
 
     s_optAcceptKeyVK = s_optTempEntries[0].vkCode;
     s_optCancelKeyVK = s_optTempEntries[1].vkCode;
@@ -1148,7 +1349,7 @@ unsigned int options_display_config_handler(void)
         *(int*)(pTmp + 8) = 0;
         *(int*)(pTmp + 0xc) = 0;
         pTmp += 0x14;
-    } while (pTmp < (unsigned char*)&s_optTempEntries[9]);
+    } while (pTmp < (unsigned char*)&s_optTempEntries[12]);   // Mod: 12 rows
 
     // Reset state
     *(int*)(((unsigned char*)&s_optTempEntries[0]) + 0x108) = 0; // 0x00bcb408
@@ -1225,6 +1426,18 @@ unsigned int options_display_config_input(void)
                 s_optTempEntries[8].vkCode = g_keyBindingData[i];
                 s_optTempEntries[8].keyIndex = i;
             }
+            else if (btnMask == OPT_QUICKTURN_BIT) {   // Mod: QUICK TURN
+                s_optTempEntries[9].vkCode = g_keyBindingData[i];
+                s_optTempEntries[9].keyIndex = i;
+            }
+            else if (btnMask == OPT_QUICKKNIFE_BIT) {  // Mod: QUICK KNIFE
+                s_optTempEntries[10].vkCode = g_keyBindingData[i];
+                s_optTempEntries[10].keyIndex = i;
+            }
+            else if (btnMask == OPT_RELOAD_BIT) {      // Mod: RELOAD
+                s_optTempEntries[11].vkCode = g_keyBindingData[i];
+                s_optTempEntries[11].keyIndex = i;
+            }
             remapTbl--;
             i--;
         } while (i >= 0);
@@ -1255,7 +1468,7 @@ unsigned int options_display_config_input(void)
         else if ((padByte & 0x80) != 0) {
             // Square (raw) → back to EXIT slot (0x00451c62)
             play_sfx(3, 4, 0);
-            s_optCursorPos = 2;
+            s_optCursorPos = 1;     // Mod: KEYBOARD (EXIT is its own row now)
             return 0;
         }
         else if ((padByte & 0x20) != 0) {
@@ -1269,7 +1482,7 @@ unsigned int options_display_config_input(void)
             play_sfx(3, 4, 0);
             s_optCursorHighlight[s_optCursorIndex] = 0;
             s_optCursorIndex--;
-            if (s_optCursorIndex < 0) s_optCursorIndex = 8;
+            if (s_optCursorIndex < 0) s_optCursorIndex = 11;  // Mod: QUICK TURN / KNIFE / RELOAD rows
             s_optAnimFrameCounter = 0;
             s_optCursorHighlight[s_optCursorIndex] = 1;
             ((unsigned char*)&g_playerEntity)[0xbe] = 0;
@@ -1279,7 +1492,7 @@ unsigned int options_display_config_input(void)
             play_sfx(3, 4, 0);
             s_optCursorHighlight[s_optCursorIndex] = 0;
             s_optCursorIndex++;
-            if (s_optCursorIndex > 8) s_optCursorIndex = 0;
+            if (s_optCursorIndex > 11) s_optCursorIndex = 0;
             s_optAnimFrameCounter = 0;
             s_optCursorHighlight[s_optCursorIndex] = 1;
             ((unsigned char*)&g_playerEntity)[0xbe] = 0;
@@ -1307,12 +1520,6 @@ unsigned int options_display_config_input(void)
                     s_optPrevKeyScan = scanResult;
                     // Check if this is a valid key (not ESC/ENTER/SPACE/DELETE)
                     switch ((unsigned int)scanResult) {
-                    case 0xd:  // ENTER
-                    case 0x11: // ESC
-                    case 0x1b: // ESCAPE
-                    case 0x20: // SPACE
-                        s_optSubSubState = 1;
-                        break;
 
                     case 0x25: case 0x26: case 0x27: case 0x28: // Arrow keys
                     case 0x30: case 0x31: case 0x32: case 0x33: // 0-3
@@ -1333,6 +1540,9 @@ unsigned int options_display_config_input(void)
                     case 0xbd: case 0xbe: case 0xbf: // - . /
                     case 0xc0: case 0xdb: case 0xdc: // ` [ \
                     case 0xdd: case 0xde: case 0xe2: // ] ' extra
+                    case 0x01: case 0x02: case 0x04: case 0x05: case 0x06: // mod: mouse 1-5
+                    case 0x09: case 0x10: case 0x12:                       // mod: Tab, Shift, Alt
+                    case 0x0d: case 0x11: case 0x1b: case 0x20:            // mod: Enter, Ctrl, Esc, Space
                     {
                         // Check for duplicate key - swap if found
                         found = false;
@@ -1373,7 +1583,7 @@ unsigned int options_display_config_input(void)
                             }
                             pCheck += 0x14;
                             j++;
-                        } while (pCheck < (unsigned char*)&s_optTempEntries[9]);
+                        } while (pCheck < (unsigned char*)&s_optTempEntries[12]);
 
                         i = s_optCursorIndex;
                         if (!found) {
@@ -1421,7 +1631,7 @@ unsigned int options_display_config_input(void)
 
         options_map_vk_to_controller_symbol(pEntry - 2);
         if ((*pEntry == 0xff) || ((short)*pEntry == 0xbc) || ((short)*pEntry == 0xbf)) {
-            sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)pEntry[-2]);
+            opt_vk_sprintf((unsigned char)pEntry[-2]);
             PrintText8x14((short)(s_optDisplayXOffset + 0x91),
                 s_optDisplayLabelY[i / 4] + s_optDisplayYOffset + 1, hlState, 0);
         }
@@ -1432,7 +1642,7 @@ unsigned int options_display_config_input(void)
         }
         i += 4;
         pEntry += 0x14;
-    } while (pEntry < ((unsigned char*)&s_optTempEntries[9]) + 2);
+    } while (pEntry < ((unsigned char*)&s_optTempEntries[12]) + 2);   // Mod: 12 rows
 
     // Print action labels
     PrintFormattedText(0xa2, s_optDisplayLabelY[0], s_optCursorHighlight[0], s_optLabelText_Action);
@@ -1444,11 +1654,14 @@ unsigned int options_display_config_input(void)
     PrintFormattedText(0xa2, s_optDisplayLabelY[6], s_optCursorHighlight[6], s_optLabelText_Aim);
     PrintFormattedText(0xa2, s_optDisplayLabelY[7], s_optCursorHighlight[7], s_optLabelText_QuickTurn);
     PrintFormattedText(0xa2, s_optDisplayLabelY[8], s_optCursorHighlight[8], s_optLabelText_Map);
+    PrintFormattedText(0xa2, s_optDisplayLabelY[9], s_optCursorHighlight[9], s_optText_QuickTurnMod);
+    PrintFormattedText(0xa2, s_optDisplayLabelY[10], s_optCursorHighlight[10], s_optText_QuickKnifeMod);
+    PrintFormattedText(0xa2, s_optDisplayLabelY[11], s_optCursorHighlight[11], s_optText_ReloadMod);
 
     // Render special key display (ACTION accept key)
     options_map_vk_to_font_index((unsigned char*)&s_optTempEntries[0]);
     if (s_optTempEntries[0].displayChar == 0xff) {
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)s_optTempEntries[0].vkCode);
+        opt_vk_sprintf((unsigned char)s_optTempEntries[0].vkCode);
         i = s_optTempEntries[0].animState;
         if (s_optTempEntries[0].animState <= s_optCursorHighlight[0]) i = s_optCursorHighlight[0];
         PrintText8x8(0x130, (short)(s_optDisplayLabelY[0] + 6), (unsigned char)i, '\0');
@@ -1463,7 +1676,7 @@ unsigned int options_display_config_input(void)
     // CANCEL key
     options_map_vk_to_font_index((unsigned char*)&s_optTempEntries[1]);
     if (s_optTempEntries[1].displayChar == 0xff) {
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)s_optTempEntries[1].vkCode);
+        opt_vk_sprintf((unsigned char)s_optTempEntries[1].vkCode);
         i = s_optTempEntries[1].animState;
         if (s_optTempEntries[1].animState <= s_optCursorHighlight[1]) i = s_optCursorHighlight[1];
         PrintText8x8(0x120, (short)(s_optDisplayLabelY[1] + 6), (unsigned char)i, '\0');
@@ -1478,7 +1691,7 @@ unsigned int options_display_config_input(void)
     // START key (multi-column)
     options_map_vk_to_font_index((unsigned char*)&s_optTempEntries[2]);
     if (s_optTempEntries[2].displayChar == 0xff) {
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)s_optTempEntries[2].vkCode);
+        opt_vk_sprintf((unsigned char)s_optTempEntries[2].vkCode);
         i = s_optTempEntries[2].animState;
         if (s_optTempEntries[2].animState <= s_optCursorHighlight[0]) i = s_optCursorHighlight[0];
         PrintText8x8(0x120, (short)(s_optDisplayLabelY[0] + 6), (unsigned char)i, '\0');
@@ -1505,7 +1718,7 @@ unsigned int options_display_config_input(void)
     // L1 key (multi-column)
     options_map_vk_to_font_index((unsigned char*)&s_optTempEntries[3]);
     if (s_optTempEntries[3].displayChar == 0xff) {
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)s_optTempEntries[3].vkCode);
+        opt_vk_sprintf((unsigned char)s_optTempEntries[3].vkCode);
         i = s_optTempEntries[3].animState;
         if (s_optTempEntries[3].animState <= s_optCursorHighlight[1]) i = s_optCursorHighlight[1];
         PrintText8x8(0x130, (short)(s_optDisplayLabelY[1] + 6), (unsigned char)i, '\0');
@@ -1526,7 +1739,7 @@ unsigned int options_display_config_input(void)
     // R1 key
     options_map_vk_to_font_index((unsigned char*)&s_optTempEntries[4]);
     if (s_optTempEntries[4].displayChar == 0xff) {
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)s_optTempEntries[4].vkCode);
+        opt_vk_sprintf((unsigned char)s_optTempEntries[4].vkCode);
         i = s_optTempEntries[4].animState;
         if (s_optTempEntries[4].animState <= s_optCursorHighlight[4]) i = s_optCursorHighlight[4];
         PrintText8x8(0x130, (short)(s_optDisplayLabelY[4] + 6), (unsigned char)i, '\0');
@@ -1550,7 +1763,8 @@ unsigned int options_display_config_input(void)
         if ((*(char*)(((unsigned char*)ENTITY) + 0xbe) == 0) && (*(char*)(((unsigned char*)ENTITY) + 0xbf) == 1)) {
             // Advance the demo script for the highlighted option row
             unsigned char charId = *(unsigned char*)(((unsigned char*)ENTITY) + 1);
-            const int* script = PTR_PTR_004c0470[charId][s_optCursorIndex];
+            // Mod: rows past the table (QUICK TURN / KNIFE) have no demo.
+            const int* script = (s_optCursorIndex < 10) ? PTR_PTR_004c0470[charId][s_optCursorIndex] : NULL;
             if (script != NULL) {  // row 9 is the table terminator
                 s_optAnimFrameData = script[s_optAnimFrameCounter + 1];
                 *(unsigned char*)(((unsigned char*)ENTITY) + 0xbd) =
@@ -1664,14 +1878,18 @@ unsigned int options_display_config_input(void)
         }
 
 doJointMove:
-        Joint_move(s_optAnimFrameData, g_playerEntity.jointMoveData0,
-            g_playerEntity.jointMoveData1, 0x400);
+        if (!g_optFromTitle) {  // Mod: no player model at the title
+            Joint_move(s_optAnimFrameData, g_playerEntity.jointMoveData0,
+                g_playerEntity.jointMoveData1, 0x400);
+        }
     }
 
 updateRender:
-    EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
-    EntityApplyLookAtRotation();
-    options_render_entity((int)&g_playerEntity);
+    if (!g_optFromTitle) {
+        EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
+        EntityApplyLookAtRotation();
+        options_render_entity((int)&g_playerEntity);
+    }
     return 1;
 }
 
@@ -1704,7 +1922,7 @@ unsigned int options_key_config_handler(void)
 
         // Clear cursor highlights
         unsigned int* pHL = (unsigned int*)&s_optCursorHighlight[0];
-        for (int i = 0xb; i != 0; i--) {
+        for (int i = 0x10; i != 0; i--) {
             *pHL = 0;
             pHL++;
         }
@@ -1719,7 +1937,7 @@ unsigned int options_key_config_handler(void)
             *(int*)(pTmp + 8) = 0;
             *(int*)(pTmp + 0xc) = 0;
             pTmp += 0x14;
-        } while (pTmp < (unsigned char*)&s_optTempEntries[5]);
+        } while (pTmp < (unsigned char*)&s_optTempEntries[8]);   // Mod: 8 rows
 
         // Set up player entity
         ENTITY = (Entity*)&g_playerEntity;
@@ -1751,7 +1969,7 @@ unsigned int options_key_config_handler(void)
         *(int*)(pTmp + 8) = 0;
         *(int*)(pTmp + 0xc) = 0;
         pTmp += 0x14;
-    } while (pTmp < (unsigned char*)&s_optTempEntries[5]);
+    } while (pTmp < (unsigned char*)&s_optTempEntries[8]);   // Mod: 8 rows
 
     // Reset state
     *(int*)(((unsigned char*)&s_optTempEntries[0]) + 0x108) = 0;
@@ -1818,6 +2036,18 @@ unsigned int options_key_config_input(void)
                 s_optTempEntries[4].pad2 = 0x900;
                 s_optTempEntries[4].keyIndex = i;
             }
+            else if (joyVal == OPT_QUICKTURN_BIT) {   // Mod: QUICK TURN
+                s_optTempEntries[5].pad2 = OPT_QUICKTURN_BIT;
+                s_optTempEntries[5].keyIndex = i;
+            }
+            else if (joyVal == OPT_QUICKKNIFE_BIT) {  // Mod: QUICK KNIFE
+                s_optTempEntries[6].pad2 = OPT_QUICKKNIFE_BIT;
+                s_optTempEntries[6].keyIndex = i;
+            }
+            else if (joyVal == OPT_RELOAD_BIT) {      // Mod: RELOAD
+                s_optTempEntries[7].pad2 = OPT_RELOAD_BIT;
+                s_optTempEntries[7].keyIndex = i;
+            }
         }
         s_optSubSubState = 1;
     }
@@ -1828,7 +2058,7 @@ unsigned int options_key_config_input(void)
         if ((padByte & 0x80) != 0) {
             // Square → exit to joystick tab
             play_sfx(3, 4, 0);
-            s_optCursorPos = 2;
+            s_optCursorPos = 0;     // Mod: GAME PAD (EXIT is its own row now)
             return 0;
         }
         else if ((padByte & 0x20) != 0) {
@@ -1842,7 +2072,7 @@ unsigned int options_key_config_input(void)
             play_sfx(3, 4, 0);
             s_optCursorHighlight[s_optCursorIndex] = 0;
             s_optCursorIndex--;
-            if (s_optCursorIndex < 0) s_optCursorIndex = 4;
+            if (s_optCursorIndex < 0) s_optCursorIndex = 7;   // Mod: QUICK TURN / KNIFE / RELOAD rows
             s_optAnimFrameCounter = 0;
             s_optCursorHighlight[s_optCursorIndex] = 2;
             ((unsigned char*)&g_playerEntity)[0xbe] = 0;
@@ -1852,7 +2082,7 @@ unsigned int options_key_config_input(void)
             play_sfx(3, 4, 0);
             s_optCursorHighlight[s_optCursorIndex] = 0;
             s_optCursorIndex++;
-            if (s_optCursorIndex > 4) s_optCursorIndex = 0;
+            if (s_optCursorIndex > 7) s_optCursorIndex = 0;
             s_optAnimFrameCounter = 0;
             s_optCursorHighlight[s_optCursorIndex] = 2;
             ((unsigned char*)&g_playerEntity)[0xbe] = 0;
@@ -1916,12 +2146,20 @@ unsigned int options_key_config_input(void)
                                     case 2: ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[checkIdx].keyIndex] = 8; break;
                                     case 3: ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[checkIdx].keyIndex] = 0x800; break;
                                     case 4: ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[checkIdx].keyIndex] = 0x900; break;
+                                    case 5:   // Mod: QUICK TURN (may have been unbound)
+                                    case 6:   // Mod: QUICK KNIFE
+                                    case 7:   // Mod: RELOAD
+                                        if (s_optTempEntries[checkIdx].keyIndex >= 0 && s_optTempEntries[checkIdx].keyIndex < 32)
+                                            ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[checkIdx].keyIndex] =
+                                                (checkIdx == 5) ? OPT_QUICKTURN_BIT :
+                                                (checkIdx == 6) ? OPT_QUICKKNIFE_BIT : OPT_RELOAD_BIT;
+                                        break;
                                     }
                                     break;
                                 }
                                 pCheck += 0x14;
                                 checkIdx++;
-                            } while (pCheck < (unsigned char*)&s_optTempEntries[5].keyIndex + 4);
+                            } while (pCheck < (unsigned char*)&s_optTempEntries[8].keyIndex + 4);
 
                             // Find bit position of new button
                             for (j = 0; 1 << ((unsigned char)j & 0x1f) != s_optJoyButtonScan; j++) {}
@@ -1953,6 +2191,24 @@ unsigned int options_key_config_input(void)
                                 if (!swapped) ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[4].keyIndex] = 0;
                                 ((unsigned int*)g_JoyRemapTbl[1])[j] = 0x900;
                                 s_optTempEntries[4].keyIndex = j;
+                                break;
+                            case 5:   // Mod: QUICK TURN
+                                if (!swapped && s_optTempEntries[5].keyIndex >= 0 && s_optTempEntries[5].keyIndex < 32)
+                                    ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[5].keyIndex] = 0;
+                                ((unsigned int*)g_JoyRemapTbl[1])[j] = OPT_QUICKTURN_BIT;
+                                s_optTempEntries[5].keyIndex = j;
+                                break;
+                            case 6:   // Mod: QUICK KNIFE
+                                if (!swapped && s_optTempEntries[6].keyIndex >= 0 && s_optTempEntries[6].keyIndex < 32)
+                                    ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[6].keyIndex] = 0;
+                                ((unsigned int*)g_JoyRemapTbl[1])[j] = OPT_QUICKKNIFE_BIT;
+                                s_optTempEntries[6].keyIndex = j;
+                                break;
+                            case 7:   // Mod: RELOAD
+                                if (!swapped && s_optTempEntries[7].keyIndex >= 0 && s_optTempEntries[7].keyIndex < 32)
+                                    ((unsigned int*)g_JoyRemapTbl[1])[s_optTempEntries[7].keyIndex] = 0;
+                                ((unsigned int*)g_JoyRemapTbl[1])[j] = OPT_RELOAD_BIT;
+                                s_optTempEntries[7].keyIndex = j;
                                 break;
                             }
 
@@ -1993,13 +2249,12 @@ unsigned int options_key_config_input(void)
     i = 0;
     do {
         next = (KeyBindEntry*)(pEntry + 0x14);
-        options_map_key_to_print_index((int)pEntry);
-        sprintf(PRINT_TEXT_BUFFER, s_fmt_c, (int)(char)pEntry[1]);
+        opt_pad_sprintf((int)pEntry);
         PrintText8x14(0x91, s_optKeyLabelY[i / 4] + s_optJoyLabelYOffset + 1,
             (unsigned char)s_optCursorHighlight[i / 4], 0);
         pEntry = (unsigned char*)next;
         i += 4;
-    } while (next < &s_optTempEntries[5]);
+    } while (next < &s_optTempEntries[8]);   // Mod: 8 rows
 
     // Action labels (0x00453318)
     PrintFormattedText(0xa2, s_optKeyLabelY[0], s_optCursorHighlight[0], s_optLabelText_Action);
@@ -2007,13 +2262,17 @@ unsigned int options_key_config_input(void)
     PrintFormattedText(0xa2, s_optKeyLabelY[2], s_optCursorHighlight[2], s_optLabelText_Start);
     PrintFormattedText(0xa2, s_optKeyLabelY[3], s_optCursorHighlight[3], s_optLabelText_QuickTurn);
     PrintFormattedText(0xa2, s_optKeyLabelY[4], s_optCursorHighlight[4], s_optLabelText_Map);
+    PrintFormattedText(0xa2, s_optKeyLabelY[5], s_optCursorHighlight[5], s_optText_QuickTurnMod);
+    PrintFormattedText(0xa2, s_optKeyLabelY[6], s_optCursorHighlight[6], s_optText_QuickKnifeMod);
+    PrintFormattedText(0xa2, s_optKeyLabelY[7], s_optCursorHighlight[7], s_optText_ReloadMod);
 
     // Player model animation
     if (s_optAnimSkipFlag == 0) {
         if ((*(char*)(((unsigned char*)ENTITY) + 0xbe) == 0) && (*(char*)(((unsigned char*)ENTITY) + 0xbf) == 1)) {
             // Advance the demo script for the highlighted joystick option row
             unsigned char charId = *(unsigned char*)(((unsigned char*)ENTITY) + 1) & 1;
-            const int* script = PTR_PTR_004c04a8[charId][s_optCursorIndex];
+            // Mod: rows past the table (QUICK TURN / KNIFE) have no demo.
+            const int* script = (s_optCursorIndex < 6) ? PTR_PTR_004c04a8[charId][s_optCursorIndex] : NULL;
             if (script != NULL) {  // row 5 is the table terminator
                 s_optAnimFrameData = script[s_optAnimFrameCounter + 1];
                 *(unsigned char*)(((unsigned char*)ENTITY) + 0xbd) =
@@ -2062,14 +2321,18 @@ unsigned int options_key_config_input(void)
             goto keyConfigRender;
         }
 
-        Joint_move(s_optAnimFrameData, g_playerEntity.jointMoveData0,
-            g_playerEntity.jointMoveData1, 0x400);
+        if (!g_optFromTitle) {  // Mod: no player model at the title
+            Joint_move(s_optAnimFrameData, g_playerEntity.jointMoveData0,
+                g_playerEntity.jointMoveData1, 0x400);
+        }
     }
 
 keyConfigRender:
-    EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
-    EntityApplyLookAtRotation();
-    options_render_entity((int)&g_playerEntity);
+    if (!g_optFromTitle) {
+        EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
+        EntityApplyLookAtRotation();
+        options_render_entity((int)&g_playerEntity);
+    }
     return 1;
 }
 
@@ -2101,7 +2364,7 @@ unsigned int options_joystick_config_handler(void)
         s_optSubInitState = 1;
 
         unsigned int* pHL = (unsigned int*)&s_optCursorHighlight[0];
-        for (int i = 0xb; i != 0; i--) {
+        for (int i = 0x10; i != 0; i--) {
             *pHL = 0;
             pHL++;
         }
@@ -2606,6 +2869,7 @@ void options_menu(void)
     localCamMatrix.m[1][1] = 5000;
 
     s_optCurrentTab = 0; // 0x00ac9cf9
+    g_optMenuActive = 1;
 
     // Sub-menu handler function table
     typedef unsigned int (*SubHandler)(void);
@@ -2618,6 +2882,8 @@ void options_menu(void)
     s_optMainState = 0; // 0x00ac9e70
     g_controllerConfig = g_controllerConfig & 0xef;
     s_optCursorPos = 0; // 0x00ac9e73
+    s_optTopPos = 0;
+    s_optUseJoystickMode = 0;   // Mod: start on the bottom row
 
     // Check if controller flag needs to be set
     if ((g_main_state_flags2 & MSF2_SCREEN_BORDER) != 0) {
@@ -2678,8 +2944,10 @@ void options_menu(void)
     // Set up player entity for options display
     g_EquippedItemId = 1;
     g_playerEntity.equippedWeaponId = 2;
-    LoadEquippedWeaponAnimation(2, 0xe, (unsigned int)g_animationBuffer,
-                                (unsigned int)g_animObjectBuffer);
+    if (!g_optFromTitle) {      // Mod: no player model at the title
+        LoadEquippedWeaponAnimation(2, 0xe, (unsigned int)g_animationBuffer,
+                                    (unsigned int)g_animObjectBuffer);
+    }
     SetSubpixelOffset(0xa0, 0x78);
 
     ENTITY = (Entity*)&g_playerEntity;
@@ -2716,6 +2984,13 @@ void options_menu(void)
         case 1:
 stateMainNav:
         {
+            if (s_optNavHold > 0) {     // Mod: let a tab's CANCEL settle
+                s_optNavHold--;
+                break;
+            }
+            // Mod: GAME PAD | KEYBOARD is two buttons now; anything else the
+            // original code may leave here (its old EXIT slot, 2) is GAME PAD.
+            if (s_optCursorPos != 1) s_optCursorPos = 0;
             unsigned short held = (unsigned short)g_PlayerPadHeld;
             if ((held & 0x840) != 0) {
                 // L1+R1 or SELECT pressed - exit
@@ -2728,6 +3003,7 @@ stateMainNav:
                     if (s_optCursorPos == 0) {
                         play_sfx(3, 6, 0);
                         s_optSubInitState = 0;
+                        s_optKeyScanResult = 0;     // Mod: a stale ESC would close it at once
                         s_optMainState = 3;
                         if (s_optCurrentTab != 0) {
                             LoadFile(s_optBgKeyConfig, &g_TimImageBuffer, 0x20);
@@ -2741,6 +3017,7 @@ stateMainNav:
                     else if (s_optCursorPos == 1) {
                         play_sfx(3, 6, 0);
                         s_optSubInitState = 0;
+                        s_optKeyScanResult = 0;     // Mod: a stale ESC would close it at once
                         s_optMainState = 2;
                         if (s_optCurrentTab != 1) {
                             LoadFile(s_optBgDisplayCfg, &g_TimImageBuffer, 0x20);
@@ -2751,22 +3028,36 @@ stateMainNav:
                             s_optCurrentTab = 1;
                         }
                     }
-                    else if (s_optCursorPos == 2) {
-                        options_menu_exit();
-                    }
+                }
+                else if (s_optUseJoystickMode == 3) {
+                    // Mod: EXIT row.
+                    play_sfx(3, 5, 0);
+                    options_menu_exit();
+                }
+                else if (s_optUseJoystickMode == 4) {
+                    // Mod: QUIT GAME row - ask first (cursor starts on NO).
+                    play_sfx(3, 6, 0);
+                    s_optQuitSel = 1;
+                    OptConfirm_Open();
+                    s_optMainState = 9;
                 }
                 else {
+                    // Mod: the top row is VIDEO | SOUND (the SideWinder
+                    // screen, state 5, is no longer reachable).
+                    // Mod: row 2 (bottom) is GAMEPLAY.
+                    const char want = (s_optUseJoystickMode == 2) ? OPT_TAB_GAMEPLAY :
+                                      s_optTopPos ? OPT_TAB_SOUND : OPT_TAB_VIDEO;
                     play_sfx(3, 6, 0);
-                    s_optSubInitState = 0;
-                    s_optMainState = 5;
-                    if (s_optCurrentTab != 2) {
-                        LoadFile(s_optBgJoystick, &g_TimImageBuffer, 0x20);
+                    if (s_optCurrentTab != want) {
+                        LoadFile(want == OPT_TAB_VIDEO ? s_optBgDisplayCfg : s_optBgKeyConfig,
+                                 &g_TimImageBuffer, 0x20);
                         display_image(8, g_TimImageBuffer__bitmap, 0x140, 0xf0);
-                        title_setup_texture_pages(8, 0);
-                        // empty_00470960(8): empty in the original - call dropped
+                        title_setup_texture_pages(8, 1);
                         StMask(0, 3);
-                        s_optCurrentTab = 2;
+                        s_optCurrentTab = want;
                     }
+                    OptTab_Open(want - OPT_TAB_VIDEO);
+                    s_optMainState = 6 + (want - OPT_TAB_VIDEO);     // 6 / 7 / 8
                 }
             }
             else {
@@ -2776,6 +3067,17 @@ stateMainNav:
                     // UP/DOWN selected
                     play_sfx(3, 4, 0);
                     if (s_optUseJoystickMode != 0) {
+                        // Mod: top row - LEFT/RIGHT pick VIDEO or SOUND;
+                        // GAMEPLAY / EXIT / QUIT are single buttons.
+                        if (s_optUseJoystickMode == 1) s_optTopPos = s_optTopPos ? 0 : 1;
+                        break;
+                    }
+                    else if (1) {
+                        // Mod: GAME PAD | KEYBOARD - just toggle.
+                        s_optCursorPos = s_optCursorPos ? 0 : 1;
+                        break;
+                    }
+                    else if (0) {
                         // In joystick mode - run joystick sub-handler
                         s_optSubInitState = 0;
                         do {
@@ -2804,6 +3106,8 @@ afterSubHandler:
                     if ((result & 0x8000) == 0) {
                         // Not CROSS pressed
                         if (s_optCursorPos == 2) {
+                            // Mod: VIDEO / SOUND have no binding handler.
+                            if (s_optCurrentTab >= OPT_TAB_VIDEO) goto afterSubHandlerNav;
                             s_optSubInitState = 0;
                             do {
                                 char ret = handlers[s_optCurrentTab]();
@@ -2824,6 +3128,7 @@ afterSubHandlerNav:;
                         }
                     }
                     else if (s_optCursorPos == 0) {
+                        if (s_optCurrentTab >= OPT_TAB_VIDEO) goto afterSubHandlerCross;   // Mod
                         s_optSubInitState = 0;
                         do {
                             char ret = handlers[s_optCurrentTab]();
@@ -2845,7 +3150,13 @@ afterSubHandlerCross:;
                 if ((result & 0x5000) != 0) {
                     // LEFT/RIGHT - toggle joystick mode
                     play_sfx(3, 4, 0);
-                    s_optUseJoystickMode = (s_optUseJoystickMode == 0) ? 1 : 0;
+                    // Mod: five rows, top to bottom EXIT (3), VIDEO|SOUND (1),
+                    // PAD|KEYBOARD (0), GAMEPLAY (2), QUIT GAME (4).
+                    static const char kOrder[5] = { 3, 1, 0, 2, 4 };
+                    int r = 0;
+                    while (r < 4 && kOrder[r] != s_optUseJoystickMode) r++;
+                    r = (result & 0x1000) ? (r + 4) % 5 : (r + 1) % 5;
+                    s_optUseJoystickMode = kOrder[r];
                 }
             }
             break;
@@ -2858,8 +3169,10 @@ afterSubHandlerCross:;
                 if (ret != 0) break;
                 Task_sleep(1);
             } while (g_resetGameFlag == 0);
+            ConfigFile_Save();      // Mod: keyboard bindings persist at once
             if (((unsigned short)g_PlayerPadHeld & 0x800) == 0) {
                 s_optMainState = 1;
+                s_optNavHold = 6;           // Mod: let the button that closed it settle
             }
             else {
                 play_sfx(3, 5, 0);
@@ -2878,8 +3191,10 @@ afterSubHandlerCross:;
             memcpy(s_joyRemapBackupKey, g_JoyRemapTbl[1], 32 * sizeof(unsigned int));
 afterKeyConfig:
             memcpy(s_joyRemapBackupKey, g_JoyRemapTbl[1], 32 * sizeof(unsigned int));
+            ConfigFile_Save();      // Mod: pad bindings persist at once
             if (((unsigned short)g_PlayerPadHeld & 0x800) == 0) {
                 s_optMainState = 1;
+                s_optNavHold = 6;           // Mod: let the button that closed it settle
             }
             else {
                 play_sfx(3, 5, 0);
@@ -2893,6 +3208,18 @@ afterKeyConfig:
                 // Restore player entity
                 memcpy(&g_playerEntity, savedEntityData, 0x180);
                 g_EquippedItemId = savedEquippedItemId;
+                if (g_optFromTitle) {
+                    // Mod: opened from the title - nothing in play to restore.
+                    g_main_state_flags = g_main_state_flags & ~MSF_MENU_BYTE;
+                    if ((g_controllerConfig & 0x10) != 0) {
+                        g_main_state_flags2 = g_main_state_flags2 | MSF2_SCREEN_BORDER;
+                        g_controllerConfig = g_controllerConfig & 0xef;
+                    }
+                    s_loadSaveStateFlag = 0;
+                    Task_Resume(0);
+                    g_optMenuActive = 0;
+                    Task_exit(); // Does not return
+                }
                 menu_update_equipped_weapon();
                 LoadEquippedWeaponAnimation(g_playerEntity.equippedWeaponId, 0xe,
                     (unsigned int)g_animationBuffer, (unsigned int)g_animObjectBuffer);
@@ -2927,9 +3254,33 @@ afterKeyConfig:
                 cut_set();
                 s_loadSaveStateFlag = 0;
                 Task_Resume(0);
-                Task_exit(); // Does not return
+                g_optMenuActive = 0;
+                    Task_exit(); // Does not return
             }
             break;
+
+        case 6:     // Mod: VIDEO tab
+        case 7:     // Mod: SOUND tab
+        case 8:     // Mod: GAMEPLAY tab
+            if (OptTab_Update(s_optMainState - 6)) {
+                s_optMainState = 1;
+                s_optNavHold = 6;
+            }
+            break;
+
+        case 9:     // Mod: QUIT GAME confirm
+        {
+            const int r = OptConfirm_Update(&s_optQuitSel);
+            if (r == 1) {
+                if (!g_optFromTitle) g_resetGameFlag = 1;   // back to the title
+                s_optMainState = 4;
+                options_menu_exit();
+            } else if (r == 2) {
+                s_optMainState = 1;
+                s_optNavHold = 6;
+            }
+            break;
+        }
 
         case 5:
             // Joystick config sub-menu

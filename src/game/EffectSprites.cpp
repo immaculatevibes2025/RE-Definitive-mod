@@ -8,10 +8,12 @@
 // live in EffectSystem.cpp, which indexes the tables declared here.
 #include "../Globals.h"
 #include "FileLoader.h"
+#include "BattleGame.h"
 #include "SpriteRenderer.h"
 #include "../marni/MarniDX.h"
 #include "../marni/MarniSystem.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include "../system/AssetPath.h"
 #include "../DebugPrint.h"
@@ -791,6 +793,56 @@ void load_shoot_direction_data(void)
 }
 
 // ============================================================================
+// Mod: append the Black Tiger's acid glob (type 0x1E) to the current room's
+// effect sprites while the Battle Game Man Spider is active. The RDT is read
+// fresh each time (setup_effect_sprite_textures rewrites the sprite records in
+// place), into a private buffer that stays alive for the room.
+// ============================================================================
+extern int battle_man_spider_active(void);
+
+static void effect_add_man_spider_acid(void)
+{
+    if (!battle_man_spider_active()) return;
+    const unsigned char kType = 0x1E;
+    int k = 0;
+    while (k < 8 && g_abEffSpriteIndexTable[8 + k] != 0xFF) {
+        if (g_abEffSpriteIndexTable[8 + k] == kType) return;   // room already has it
+        k++;
+    }
+    if (k >= 8) return;
+
+    static unsigned char* s_bt = NULL;
+    const size_t kCap = 0x40000;
+    if (s_bt == NULL) s_bt = (unsigned char*)malloc(kCap);
+    if (s_bt == NULL) return;
+    if (!mod_asset_exists("stage3/room30c0.rdt")) return;
+    char path[256];
+    sprintf(path, GAME_DATA_ROOT "stage3\\room30c0.rdt");
+    size_t size = LoadFile(path, s_bt, 1);
+    if (size == (size_t)-1 || size < 0x94 || size > kCap) return;
+
+    unsigned int idxOff = *(unsigned int*)(s_bt + 0x7C);
+    unsigned int datOff = *(unsigned int*)(s_bt + 0x80);
+    unsigned int sprOff = *(unsigned int*)(s_bt + 0x84);
+    if (idxOff >= size || datOff >= size || sprOff >= size) return;
+    int j = 0;
+    while (j < 8 && s_bt[idxOff + j] != 0xFF && s_bt[idxOff + j] != kType) j++;
+    if (j >= 8 || s_bt[idxOff + j] != kType) return;
+
+    int dataOffset = *(int*)(s_bt + datOff - j * 4);
+    int timOffset  = *(int*)(s_bt + sprOff - j * 4);
+    if (dataOffset <= 0 || (size_t)dataOffset >= size || timOffset <= 0 || (size_t)timOffset >= size) return;
+
+    g_abEffSpriteIndexTable[8 + k] = kType;
+    if (k + 1 < 8) g_abEffSpriteIndexTable[8 + k + 1] = 0xFF;
+    unsigned char* info = s_bt + dataOffset;
+    g_effectSpriteInfo[kType] = (DWORD)info;
+    g_effectAnimData[kType] = (DWORD)info + ((unsigned int)info[2] + (unsigned int)info[0]) * 4 + 8;
+    DAT_00ac9cd0[k] = (int)(s_bt + timOffset);
+    dbg_printf("[effect] Man Spider: borrowed acid glob 0x1E into room slot %d\n", k);
+}
+
+// ============================================================================
 // InitRoomEffSprite (0x0047b9b0)
 // Initializes room effect sprites: clears the effect pool, loads effect
 // animation data from the RDT, sets up texture pages, and loads sprite TIMs.
@@ -845,6 +897,10 @@ void InitRoomEffSprite(void)
         // (RDT+3)-3 in the decompile: the offsets are relative to the RDT base.
         DAT_00ac9cd0[idx] = (int)pRdt + *(int*)(spriteImBase - idx * 4);
     } while (i < 8);
+
+    // Mod: Battle Game Man Spider - borrow the Black Tiger's acid glob (effect
+    // type 0x1E) from its room file (STAGE3/ROOM30C0) so he can spit it here.
+    effect_add_man_spider_acid();
 
     // 0x0047ba5c: Set up effect sprite texture positions
     setup_effect_sprite_textures(8);

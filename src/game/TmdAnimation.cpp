@@ -793,6 +793,14 @@ unsigned int* CreateAnimObject(int slotPtr, unsigned int* param2)
 {
     *(unsigned int**)(slotPtr + 0xc) = param2;
     AnimSlot* slot = *(AnimSlot**)(slotPtr + 8);
+    if (slot == NULL || (unsigned int)slot->data2 < 0x10000) {   // Mod: diagnostics
+        extern void crashlog_mark(const char* step);
+        char msg[160];
+        sprintf(msg, "anim: bad slot %p data2=%p count=%d entity id=%d jointIdx=%d",
+                (void*)slot, slot ? slot->data2 : NULL, slot ? slot->entryCount : -1,
+                ENTITY ? (int)ENTITY->id : -1, (int)g_animSlotIndex);
+        crashlog_mark(msg);
+    }
     *param2 = (unsigned int)slot;
     unsigned int uVar1 = FindMinClutDepth(slot);
     param2[1] = uVar1;

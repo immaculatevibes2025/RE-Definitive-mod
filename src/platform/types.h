@@ -167,6 +167,7 @@ typedef struct joyinfoex_tag {
 #define VK_DOWN      0x28
 #define VK_SNAPSHOT  0x2C
 #define VK_F1        0x70
+#define VK_F2        0x71   // port-added: Video Options menu
 #define VK_F6        0x75
 #define VK_F8        0x77
 #define VK_F9        0x78

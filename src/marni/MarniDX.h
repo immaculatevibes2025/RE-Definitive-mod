@@ -40,6 +40,55 @@ typedef enum MarniBlend : DWORD32 {
     MARNI_BLEND_DISABLE = 2,   // no blending — straight overwrite
 } MarniBlend;
 
+// Port-added aspect modes (MarniDX::SetAspectMode, config.ini [Display] Aspect).
+#define MARNI_ASPECT_STRETCH  0
+#define MARNI_ASPECT_4_3      1
+#define MARNI_ASPECT_INTEGER  2
+// Mod: 16:9 pan-and-scan. The content rectangle (and so the UI, menus and
+// text) is the 4:3 box; the game scene is drawn through a wider viewport
+// that fills the buffer's width and is cropped vertically (SetViewportMode).
+#define MARNI_ASPECT_WIDE     3
+#define MARNI_ASPECT_COUNT    4
+
+// MarniDX::SetViewportMode modes.
+#define MARNI_VP_CONTENT  0   // the content rectangle (default)
+#define MARNI_VP_SCENE    1   // widescreen: 4:3 scene scaled to the buffer width
+#define MARNI_VP_FULL     2   // widescreen: 4:3 stretched over the whole buffer
+
+// The content rectangle an aspect mode gives a back buffer of bbW x bbH.
+// Shared by both backends so they agree to the pixel. The game picture is
+// 4:3 (logical 320x240).
+inline void MarniComputeContentRect(int mode, int bbW, int bbH,
+                                    int* x, int* y, int* w, int* h)
+{
+    int cw = bbW, ch = bbH;
+    if (mode == MARNI_ASPECT_4_3 || mode == MARNI_ASPECT_WIDE) {
+        // Largest 4:3 box: full height unless that is wider than the buffer.
+        cw = (bbH * 4 + 1) / 3;
+        ch = bbH;
+        if (cw > bbW) {
+            cw = bbW;
+            ch = (bbW * 3 + 2) / 4;
+        }
+    } else if (mode == MARNI_ASPECT_INTEGER) {
+        int sx = bbW / 320, sy = bbH / 240;
+        int s = sx < sy ? sx : sy;
+        if (s < 1) {
+            // Smaller than 320x240: nothing whole fits, fall back to 4:3.
+            MarniComputeContentRect(MARNI_ASPECT_4_3, bbW, bbH, x, y, w, h);
+            return;
+        }
+        cw = 320 * s;
+        ch = 240 * s;
+    }
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    *x = (bbW - cw) / 2;
+    *y = (bbH - ch) / 2;
+    *w = cw;
+    *h = ch;
+}
+
 // ============================================================================
 // MarniDX - Singleton D3D11 backend owner.
 //
@@ -75,11 +124,41 @@ public:
     // TRUE once Create() succeeded and the device is still valid.
     BOOL IsReady() const;
 
-    // Returns the current back-buffer dimensions (0,0 if not ready).
+    // Returns the dimensions the game draws into (0,0 if not ready). With an
+    // aspect mode other than MARNI_ASPECT_STRETCH this is the CONTENT
+    // rectangle inside the back buffer, not the back buffer itself: every
+    // draw projects over these dimensions and the viewport places them, so
+    // game code (MarniGetRenderScale and friends) sees an ordinary screen of
+    // this size and the rest of the back buffer stays the clear colour.
     void GetBackBufferSize(DWORD* outWidth, DWORD* outHeight) const;
 
     // Apply a new display mode (resize the swap chain). 0 on failure.
     int  ChangeDisplayMode(DWORD newWidth, DWORD newHeight, BOOL fullScreen);
+
+    // Port-added: how the 4:3 game picture fills the back buffer.
+    //   MARNI_ASPECT_STRETCH - the whole back buffer (the port's behaviour up
+    //                          to now; non-uniform on a widescreen buffer)
+    //   MARNI_ASPECT_4_3     - the largest centred 4:3 rectangle (black bars)
+    //   MARNI_ASPECT_INTEGER - the largest whole multiple of 320x240 that fits,
+    //                          centred (every game pixel the same size)
+    // Takes effect from the next draw; GetBackBufferSize reports the new size.
+    void SetAspectMode(int mode);
+    // Mod (16:9 pan-and-scan): pick the viewport the following draws map
+    // through. panLines is the scene's vertical offset in logical lines.
+    void SetViewportMode(int mode, float panLines);
+    // Logical lines (of 240) the widescreen scene shows; 240 when it cannot
+    // crop (the buffer is not wider than 4:3).
+    float WideVisibleLines() const;
+    int  GetAspectMode() const;
+
+    // Port-added (Video Options menu): multisample anti-aliasing (1 = off,
+    // 2, 4 or 8 samples; the device may grant fewer - GetMsaa reports what is
+    // in use) and the CRT shader. Either one makes the game draw into an
+    // offscreen scene that Present() puts on the back buffer.
+    void SetMsaa(int samples);
+    int  GetMsaa() const;
+    void SetCrtShader(BOOL on);
+    BOOL GetCrtShader() const;
 
     // Handle a window message that the original vtable[5] forwarded here.
     // Returns 1 to continue default processing, 0 to suppress it.

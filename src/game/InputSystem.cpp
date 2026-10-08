@@ -2,10 +2,12 @@
 // JoyToPSX (0x00404c90), ReadPadBoth (0x00497ba0), PlayerPad_Update (0x0044e000)
 // InputUpdate (0x00497c00)
 #include "../Globals.h"
+extern int g_battleEndingCam;      // BattleGame.cpp (Saturn Battle Game mod)
 #include "../platform/platform.h"
 #include "../marni/MarniInput.h"
 #include "../marni/MarniXInput.h"
 #include <cstring>
+#include <cstdio>
 
 // ============================================================================
 // Pad default bindings (port addition)
@@ -160,16 +162,75 @@ DWORD ReadPadBoth(void)
 //   MOV ECX, 0xac4030        ; ECX = &g_pMasterInputState (__fastcall arg1)
 //   JMP  UpdateAllInputStates ; tail-call
 // ============================================================================
+// ============================================================================
+// Mod: input diagnostics + a pad kill-switch, for the "input stuck held"
+// bug (character select keeps moving, the inventory will not open).
+//
+// [Input] Gamepad=0 in config.ini ignores every controller (keyboard/mouse
+// only). [Input] InputLog=1 writes input_log.txt next to the game: one line
+// each time the raw keyboard word or any controller word changes, naming the
+// keys/buttons that are down - so a stuck one shows which device it is.
+// ============================================================================
+DWORD g_dwGamepadEnabled = 1;      // ConfigFile.cpp
+DWORD g_dwInputLog = 0;            // ConfigFile.cpp
+extern const char* ConfigFile_Find(void);   // ConfigFile.cpp
+
+static void InputDebugLog(void)
+{
+	static FILE* s_log = NULL;
+	static DWORD s_prevKb = 0xFFFFFFFF;
+	static DWORD s_prevJoy[4] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+	static int s_lines = 0;
+	if (!g_dwInputLog || s_lines > 20000) return;
+
+	const DWORD kb = g_pMasterInputState.keyboardCurr;
+	bool changed = (kb != s_prevKb);
+	DWORD joy[4];
+	for (int i = 0; i < 4; i++) {
+		joy[i] = g_pMasterInputState.joysticks[i].enabled ? g_pMasterInputState.joysticks[i].currPress : 0;
+		if (joy[i] != s_prevJoy[i]) changed = true;
+	}
+	if (!changed) return;
+	if (s_log == NULL) {
+		// Next to config.ini (the game's data folder), not the working dir.
+		char logPath[512];
+		const char* cfg = ConfigFile_Find();
+		size_t n = (cfg != NULL) ? strlen(cfg) : 0;
+		while (n > 0 && cfg[n - 1] != '\\' && cfg[n - 1] != '/') n--;
+		if (n >= sizeof(logPath) - 16) n = 0;
+		if (n > 0) memcpy(logPath, cfg, n);
+		strcpy(logPath + n, "input_log.txt");
+		s_log = fopen(logPath, "w");
+		if (s_log == NULL) { g_dwInputLog = 0; return; }
+		fprintf(s_log, "joystickCount=%u  padConnected=%d  numControllers=%d\n",
+		        (unsigned)g_pMasterInputState.joystickCount, (int)g_bPadConnected, g_NumControllers);
+	}
+	s_prevKb = kb;
+	for (int i = 0; i < 4; i++) s_prevJoy[i] = joy[i];
+
+	static unsigned long s_frame = 0;
+	fprintf(s_log, "n=%lu kb=%08lX [", s_frame++, (unsigned long)kb);
+	for (int i = 0; i < 32; i++) {
+		if (kb & (1u << i)) fprintf(s_log, " slot%d=VK%02X", i, g_pMasterInputState.keyMap[i]);
+	}
+	fprintf(s_log, " ] joy0=%08lX joy1=%08lX joy2=%08lX joy3=%08lX pad=%08lX\n",
+	        (unsigned long)joy[0], (unsigned long)joy[1], (unsigned long)joy[2], (unsigned long)joy[3],
+	        (unsigned long)g_PadBtnWord);
+	fflush(s_log);
+	s_lines++;
+}
+
 void InputUpdate(void)
 {
 	CMarniDirectInput::UpdateAllInputStates(&g_pMasterInputState);
+	InputDebugLog();
 
 	// Port addition: republish the pad capability every frame so hot-plugging
 	// a controller works without restarting. g_NumControllers is what gates
 	// the joystick merge in ReadPadBoth; the original left it at whatever the
 	// installer wrote, and the port hard-coded it to 1, which kept the pad
 	// path dead even once a device was enumerated.
-	BOOL padNow = MarniPadIsConnected() ? TRUE : FALSE;
+	BOOL padNow = (g_dwGamepadEnabled && MarniPadIsConnected()) ? TRUE : FALSE;
 
 	// Seed a usable layout while a pad is present. This is NOT gated on a
 	// false->true transition of g_bPadConnected: InitializeMarniSystem already
@@ -286,6 +347,17 @@ DWORD PlayerPad_Update(void)
 		newHeldRaw = ReadPadBoth();
 	}
 
+	// Mod: in the inventory and the other in-game menus, GET READY (pad-word
+	// 0x08) also works as CANCEL (0x40). Not in Option Mode, whose binding
+	// screens read every button as itself.
+	{
+		extern int g_optMenuActive;   // OptionsMenu.cpp
+		if ((g_main_state_flags & MSF_MENU_ACTIVE) != 0 && !g_optMenuActive) {
+			if ((newHeldRaw & 0x08) != 0)   newHeldRaw   |= 0x40;
+			if ((g_RawPadHeld & 0x08) != 0) g_RawPadHeld |= 0x40;
+		}
+	}
+
 	// Part 4: Edge detection (uses g_RawPadHeld = previous frame's raw + new raw)
 	g_RawPadState = (WORD)newHeldRaw;
 	g_padEdgeDetectedWord = (WORD)(~g_PlayerPadHeldPrev & (WORD)newHeldRaw);
@@ -331,7 +403,8 @@ DWORD PlayerPad_Update(void)
 	// front of (ENTER/SPACE is the action key). The overlay itself samples
 	// the keyboard directly and is unaffected. g_debugMenuOpen stays 0 while
 	// debug features are disabled.
-	if (g_debugMenuOpen != 0) {
+	// Mod: also while the Battle Game's ending camera circles the player.
+	if (g_debugMenuOpen != 0 || g_videoMenuOpen != 0 || g_battleEndingCam != 0) {
 		g_PlayerPadPressed = 0;
 		g_PlayerPadHeld = 0;
 		g_PlayerDpadHeld = 0;

@@ -10,6 +10,87 @@
 #include <cstdlib>
 #include <cstring>          // memcpy, for the DC title sheet assembly
 #include "../system/AssetPath.h"
+#include "BattleGame.h"       // Saturn Battle Game mod: the third title option
+
+// Mod: Saturn Battle Game - see g_titleTextPosTableBattle below.
+static int s_titleBattle = 0;     // 1 = BATTLE GAME is offered this visit
+#define TITLE_BATTLE_BANK 9       // its sheet's texture bank (slot 13)
+
+// Mod: the scrolling title menu (data\t_menu.tim, tools/saturn/title_menu.py).
+// NEW GAME / LOAD GAME / [BATTLE GAME] / OPTIONS, three lines visible at a time;
+// moving past the top or bottom line scrolls the list, and small arrows show
+// when there is more above or below. g_titleSelectionId keeps its meaning (the
+// ACTION: 1 new, 2 load, 3 battle, 4 options), the list maps it to a line.
+// Without the sheet the title falls back to the fixed two/three-line cells.
+static int s_titleMenu = 0;       // 1 = the scrolling menu sheet is loaded
+static int s_dcSub = 0;           // DC: the difficulty submenu is up (its sheet now owns slot 13)
+static int s_titleItems[5];       // actions, in list order
+static int s_titleItemCount = 0;
+static int s_titleScroll = 0;     // first visible list index
+#define TITLE_MENU_VISIBLE 3
+#define TITLE_ACTION_OPTIONS 4
+#define TITLE_ACTION_QUIT    5   // Mod: closes the game
+
+extern void title_options_state(void);   // VideoMenu.cpp: the OPTIONS screen
+
+static int title_menu_index(int action)
+{
+    for (int i = 0; i < s_titleItemCount; i++) {
+        if (s_titleItems[i] == action) return i;
+    }
+    return 0;
+}
+
+// Draw one strip of the menu sheet at a screen position (the title's own
+// sprite path, 256-wide cells at screenX -130).
+static void title_menu_strip(int texU, int texV, int w, int h, int screenX, int screenY,
+                             unsigned char brightness)
+{
+    TextureDesc* td = &g_TextureDesc;
+    td->flags = (brightness != 0x80) ? 0x40000000 : 0x10000000;
+    td->texU = (unsigned char)texU;
+    td->texV = (unsigned char)texV;
+    td->width = w;
+    td->height = h;
+    td->screenX = screenX;
+    td->screenY = screenY;
+    td->texturePage = TITLE_BATTLE_BANK;
+    td->colorMulR = brightness;
+    td->colorMulG = brightness;
+    td->colorMulB = brightness;
+    td->clutX = 0;
+    td->clutY = 0x1E0;
+    td->pivotX = 0;
+    td->pivotY = 0;
+    display_texture(td, 2, 13, 1);
+}
+
+static void title_menu_draw(unsigned char brightness, int selectedAction)
+{
+    const int sel = title_menu_index(selectedAction);
+    if (sel < s_titleScroll) s_titleScroll = sel;
+    if (sel >= s_titleScroll + TITLE_MENU_VISIBLE) s_titleScroll = sel - TITLE_MENU_VISIBLE + 1;
+    int maxScroll = s_titleItemCount - TITLE_MENU_VISIBLE;
+    if (maxScroll < 0) maxScroll = 0;
+    if (s_titleScroll > maxScroll) s_titleScroll = maxScroll;
+
+    // Lines where the original cell put them: 41, 59, 77; copyright 99, 111.
+    for (int r = 0; r < TITLE_MENU_VISIBLE && s_titleScroll + r < s_titleItemCount; r++) {
+        const int idx = s_titleScroll + r;
+        const int line = s_titleItems[idx] - 1;          // sheet line 0..4
+        const int texV = (idx == sel ? 0 : 60) + line * 12;
+        title_menu_strip(0, texV, 256, 11, -130, 41 + r * 18, brightness);
+    }
+    title_menu_strip(0, 120, 256, 9, -130, 99, brightness);
+    title_menu_strip(0, 132, 256, 9, -130, 111, brightness);
+    // Arrows to the right of the list when there is more above / below.
+    if (s_titleScroll > 0) {
+        title_menu_strip(0, 144, 9, 5, 84, 41 + 3, brightness);
+    }
+    if (s_titleScroll + TITLE_MENU_VISIBLE < s_titleItemCount) {
+        title_menu_strip(0, 152, 9, 5, 84, 41 + 2 * 18 + 3, brightness);
+    }
+}
 
 extern void logos_state(void);
 
@@ -192,7 +273,13 @@ void init_title_screen(void)
     // The Director's Cut's own title art ("DIRECTOR'S CUT") is its overlay's
     // title.pix, so this stays one unconditional load - the base tree's file is
     // never touched and OG still gets today's screen.
-    LoadFile(GAME_DATA_ROOT "data\\title.pix", g_TimImageBuffer__bitmap, 0x20);
+    {   // DIAG (DC title): record what the title loads
+        extern void crashlog_mark(const char* step);
+        size_t n = LoadFile(GAME_DATA_ROOT "data\\title.pix", g_TimImageBuffer__bitmap, 0x20);
+        char m[160];
+        sprintf(m, "title: init dc=%d title.pix=%d", (int)g_bDcMode, (int)n);
+        crashlog_mark(m);
+    }
     display_image(0, g_TimImageBuffer__bitmap, 320, 240);
 
     title_setup_texture_pages(0, 1);
@@ -203,7 +290,11 @@ void init_title_screen(void)
     // needs it again. Everything else loads a ready-made sheet.
     if (g_bDcMode) {
         static const int kTitlePageA[3] = { 0, 1, 2 };
-        LoadFile(GAME_DATA_ROOT "data\\bt367oab.tim", g_bgPakLoadBuffer, 0x20);
+        size_t bn = LoadFile(GAME_DATA_ROOT "data\\bt367oab.tim", g_bgPakLoadBuffer, 0x20);
+        {
+            extern void crashlog_mark(const char* step);
+            char m[96]; sprintf(m, "title: dc bt367oab=%d", (int)bn); crashlog_mark(m);
+        }
         dc_title_build_page(g_bgPakLoadBuffer, kTitlePageA, 3, DC_TITLE_CELL_H,
                             1, -1, g_TimImageBuffer__bitmap);
     } else {
@@ -236,6 +327,32 @@ void init_title_screen(void)
         g_titleTexturePageData[4] = 9;
         g_titleTexturePageData[5] = 9;
         g_titleTexturePageData[6] = 9;
+    }
+
+    // Mod: the scrolling menu sheet (NEW / LOAD / [BATTLE] / OPTIONS) on its
+    // own page; without it, the Saturn Battle Game's three-option sheet.
+    s_titleBattle = 0;
+    s_titleMenu = 0;
+    s_titleItemCount = 0;
+    s_titleScroll = 0;
+    s_dcSub = 0;
+    {   // Mod: the DC gets the same scrolling menu (USA data\t_menu.tim); its
+        // difficulty sheet is put back in slot 13 when NEW GAME opens it.
+        const int battle = battle_title_option_available();
+        if (LoadFile(GAME_DATA_ROOT "data\\t_menu.tim", g_TimImageBuffer__bitmap, 0x20) != (size_t)-1) {
+            LoadTexturePage(g_TimImageBuffer__bitmap, TITLE_BATTLE_BANK, 0, 13, 0, 0, 0, 0);
+            s_titleMenu = 1;
+            s_titleBattle = battle;
+            s_titleItems[s_titleItemCount++] = 1;
+            s_titleItems[s_titleItemCount++] = 2;
+            if (battle) s_titleItems[s_titleItemCount++] = 3;
+            s_titleItems[s_titleItemCount++] = TITLE_ACTION_OPTIONS;
+            s_titleItems[s_titleItemCount++] = TITLE_ACTION_QUIT;
+        } else if (battle && !g_bDcMode &&
+                   LoadFile(GAME_DATA_ROOT "data\\t_battle.tim", g_TimImageBuffer__bitmap, 0x20) != (size_t)-1) {
+            LoadTexturePage(g_TimImageBuffer__bitmap, TITLE_BATTLE_BANK, 0, 13, 0, 0, 0, 0);
+            s_titleBattle = 1;
+        }
     }
 
     {
@@ -330,6 +447,22 @@ static const TitleTextPosData g_titleTextPosTableDc[7] = {
     { 192, 64, 0, 13 },  // 6: ADVANCED, confirm held
 };
 
+// Mod: Saturn Battle Game. When the mode is unlocked the USA menu becomes
+// NEW GAME / LOAD GAME / BATTLE GAME, drawn from data\t_battle.tim (built from
+// t_start.tim by tools/saturn/battle_title.py): three 80-row cells, one per
+// lit option, on a second texture page (slot 13, bank 9 - the page the DC
+// submenu uses, which this mode never shares). Each cell also carries the
+// two copyright lines at its bottom. At screenY 9 the 80-row cell ran to
+// row 127 of a 120-row half screen, so the copyright sat 5 rows lower than on
+// the PRESS ANY BUTTON screen and its last line was cut off - the menu looked
+// zoomed in. 4 puts the copyright exactly where the press screen has it and
+// keeps the whole cell on screen (38 + 4 + 80 = 122 -> the last 2 rows are
+// blank padding).
+static const TitleTextPosData g_titleTextPosTableBattle[3] = {
+    {   0, 80, 4, 13 },  // NEW GAME lit
+    {  80, 80, 4, 13 },  // LOAD GAME lit
+    { 160, 80, 4, 13 },  // BATTLE GAME lit
+};
 // ============================================================================
 // UpdateTitleTextSprite (0x00430d40)
 // ============================================================================
@@ -342,8 +475,18 @@ void UpdateTitleTextSprite(unsigned char brightness, unsigned char selectionId)
         td->flags = 0x40000000;
     }
 
+    // Mod: the scrolling menu draws the whole list itself.
+    if (s_titleMenu && !s_dcSub && selectionId >= 1 && selectionId <= TITLE_ACTION_QUIT) {
+        title_menu_draw(brightness, selectionId);
+        return;
+    }
+
     const TitleTextPosData* entry;
-    if (g_bDcMode) {
+    int battleCell = 0;
+    if (!s_titleMenu && s_titleBattle && selectionId >= 1 && selectionId <= 3) {
+        entry = &g_titleTextPosTableBattle[selectionId - 1];
+        battleCell = 1;
+    } else if (g_bDcMode) {
         if (selectionId > 6) selectionId = 0;
         entry = &g_titleTextPosTableDc[selectionId];
     } else {
@@ -353,7 +496,7 @@ void UpdateTitleTextSprite(unsigned char brightness, unsigned char selectionId)
 
     td->texU = 0;
     td->screenX = -130;
-    td->texturePage = g_titleTexturePageData[selectionId];
+    td->texturePage = battleCell ? TITLE_BATTLE_BANK : g_titleTexturePageData[selectionId];
     td->width = 256;
     td->texV = (unsigned char)entry->vramY;
     td->height = entry->sprHeight;
@@ -369,6 +512,18 @@ void UpdateTitleTextSprite(unsigned char brightness, unsigned char selectionId)
 
     td->clutY = 0x1E0;
 
+    {   // DIAG (DC title): the first few option draws
+        static int s_n = 0;
+        if (g_bDcMode && s_n < 4) {
+            extern void crashlog_mark(const char* step);
+            char m[128];
+            sprintf(m, "title: draw sel=%d page=%d slot=%d v=%d h=%d br=%d srv=%p", selectionId,
+                    td->texturePage, entry->slot, entry->vramY, entry->sprHeight, brightness,
+                    (void*)g_TexturePageSRV[15 + entry->slot]);
+            crashlog_mark(m);
+            s_n++;
+        }
+    }
     display_texture(td, 2, entry->slot, 1);
 }
 
@@ -478,14 +633,38 @@ void update_title_options(void)
 		    g_titleSelectionId == 1) {
 			g_titleOptionsFading = 10;
 			g_titleSelectionId = 3;          // STANDARD
+			if (s_titleMenu) {
+				// put the DC difficulty sheet back over the menu sheet
+				static const int kTitlePageB[4] = { 3, 4, 5, 6 };
+				LoadFile(GAME_DATA_ROOT "data\\bt367oab.tim", g_bgPakLoadBuffer, 0x20);
+				dc_title_build_page(g_bgPakLoadBuffer, kTitlePageB, 4, 64, 0, 3,
+				                    g_TimImageBuffer__bitmap);
+				cleanup_texture_slot(13);
+				LoadTexturePage(g_TimImageBuffer__bitmap, 9, 0, 13, 0, 0, 0, 0);
+			}
+			s_dcSub = 1;
 			g_titleDemoTime = 0x708;
 			g_titleHoldTimer = 0x5A;
 			return;
 		}
 
 		if ((g_PlayerPadPressed & 0xeff) || sidewinderPress) {
-			play_sfx(SFX_BANKS, SFX_TITLE_EVIL01);
-			play_sfx(SFX_BANKS, 1); // null sfx
+			{
+				char msg[64];
+				sprintf(msg, "title: confirm sel=%d menu=%d", (int)g_titleSelectionId, s_titleMenu);
+				crashlog_mark(msg);
+			}
+			// Mod: QUIT GAME closes at once - save the settings and end the
+			// process, no fade (quicker than Alt+F4's window teardown).
+			if (s_titleMenu && g_titleSelectionId == TITLE_ACTION_QUIT) {
+				CleanupVideoConfigAndSaveAllSettings();
+				ExitProcess(0);
+			}
+			// Mod: no "Resident Evil" call for OPTIONS.
+			if (!(s_titleMenu && g_titleSelectionId == TITLE_ACTION_OPTIONS)) {
+				play_sfx(SFX_BANKS, SFX_TITLE_EVIL01);
+				play_sfx(SFX_BANKS, 1); // null sfx
+			}
 			g_titleOptionsFading = 6;
 			g_fade_type_id = 1;
 			g_fading_counter = 0x7F00;
@@ -494,14 +673,26 @@ void update_title_options(void)
 			return;
 		}
 
-		if (g_PlayerPadPressed & 0x5100) {
+		if (s_titleMenu && (g_PlayerPadPressed & 0x5100)) {
+			// Mod: the scrolling menu - step through the list, wrapping.
+			int idx = title_menu_index(g_titleSelectionId);
 			if (!(g_PlayerPadPressed & 0x1100)) {
-				if (g_titleSelectionId == 2) g_titleSelectionId = 0;
+				idx = (idx + 1) % s_titleItemCount;
+			} else {
+				idx = (idx + s_titleItemCount - 1) % s_titleItemCount;
+			}
+			g_titleSelectionId = s_titleItems[idx];
+			g_titleDemoTime = 0x708;
+		} else if (g_PlayerPadPressed & 0x5100) {
+			// Mod: three options (BATTLE GAME) when s_titleBattle is set.
+			const int lastOption = s_titleBattle ? 3 : 2;
+			if (!(g_PlayerPadPressed & 0x1100)) {
+				if (g_titleSelectionId == lastOption) g_titleSelectionId = 0;
 				g_titleSelectionId++;
 			} else {
 				g_titleSelectionId--;
 				if (g_titleSelectionId == 0) {
-					g_titleSelectionId = 2;
+					g_titleSelectionId = lastOption;
 					g_titleDemoTime = 0x708;
 					goto demo_reset;
 				}
@@ -670,6 +861,11 @@ void title_state(void)
 	g_playingGameFlag = 0;
 	g_menu_choice_id = 0;
 
+    // Mod: back at the title, no Battle Game is running (a finished one, a
+    // death, F9 or the character select's cancel all come through here).
+    battle_bgm_stop();      // its music, if a run left it playing
+    battle_disarm();
+
     setMenuScreenOffset(320, 240, 0, 0, 0);
     CenterScreenOrigin();
     clear_textures();
@@ -726,6 +922,34 @@ void title_state(void)
     }
 
     cleanup_texture_slot(12);
+
+    // Mod: BATTLE GAME. The character select starts it like a new game;
+    // battle_arm makes InitializeGame set the mode up instead.
+    // Mod: OPTIONS (the scrolling menu's fourth line).
+    if (s_titleMenu && !s_dcSub) {
+        cleanup_texture_slot(13);
+        if (g_titleSelectionId == TITLE_ACTION_OPTIONS) {
+            nullsub_0047eb80();
+            Task_chain((void*)title_options_state);
+            return;
+        }
+        if (g_titleSelectionId == TITLE_ACTION_QUIT) {
+            // Mod: QUIT GAME - save the settings and close the window.
+            CleanupVideoConfigAndSaveAllSettings();
+            DestroyWindow(g_hWnd);
+            for (;;) Task_sleep(1);
+        }
+    }
+    if (s_dcSub) cleanup_texture_slot(13);
+    if (s_titleBattle && !s_dcSub) {
+        if (!s_titleMenu) cleanup_texture_slot(13);
+        if (g_titleSelectionId == 3) {
+            battle_arm();
+            nullsub_0047eb80();
+            Task_chain((void*)characterSelectionScreen);
+            return;
+        }
+    }
 
     // DC: the difficulty submenu leaves the choice at 3..5 (and 6 for ADVANCED*
     // while the green cell is drawn). The PS1's title_state groups 1 and 3..6

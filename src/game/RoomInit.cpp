@@ -29,6 +29,8 @@ extern void Room_SetupCollisionCallbacks(void);
 extern void Room_LoadEnemySoundBanks(void);
 
 #include "dc/ArrangeStages.h"   // room_file_stage()
+#include "BattleGame.h"        // battle_rdt_path (Saturn Battle Game mod)
+#include <cstring>
 
 // Entity model loading functions from EntityModelLoader.cpp
 extern void LoadEntityEMD(Entity* em, unsigned char entity_id);
@@ -38,6 +40,55 @@ extern unsigned int SetupJointStructures(unsigned int param1);
 
 // SCD script runner
 extern void run_command_functions(unsigned short* scd_opcodes);
+extern int  g_wardrobeSaturnPending;     // CmdFunctions.cpp
+
+// Mod: the wardrobe (stage 1 room 0x1C, ROOM11C0/1) gets a third closet - the
+// rack its init script sets up as room action slot 3 ("just clothes") instead
+// offers the Saturn outfit. It runs the room's own outfit-change event script
+// 0 (the one the first closet uses); create_room_event raises
+// g_wardrobeSaturnPending for slot 3 so FUN_0040c560 picks variant 2 for it.
+// Slots 4 / 5 are the two PC closets (event scripts 3 / 0, variants 1 / 0).
+static int wardrobe_room(void)
+{
+    // DC too: its STANDARD/TRAINING wardrobe is the same USA ROOM11C0/1 (the
+    // ADVANCED arrange room is a different file, so room_file_stage() rules it out).
+    return !g_battleActive && room_file_stage() == 0 && g_roomId == 0x1C;
+}
+
+static void wardrobe_set_event(int slot, int script)
+{
+    unsigned char* e = &g_RoomActionTable[slot * 0xc];
+    e[0] = 0x09;                            // create_room_event
+    e[1] = 0x81;
+    *(unsigned short*)(e + 2) = 9;          // event slot
+    *(unsigned short*)(e + 4) = (unsigned short)script;
+    *(unsigned short*)(e + 6) = 0;
+}
+
+static void wardrobe_set_message(int slot)
+{
+    unsigned char* e = &g_RoomActionTable[slot * 0xc];
+    e[0] = 0x02;                            // display_msg_room_action
+    e[1] = 0x81;
+    *(unsigned short*)(e + 2) = 0x80;       // the room's "clothes" message
+    *(unsigned short*)(e + 4) = 0x45;
+    *(unsigned short*)(e + 6) = 0;
+}
+
+static void wardrobe_saturn_setup(void)
+{
+    g_wardrobeSaturnPending = 0;
+    if (!wardrobe_room()) return;
+    if (*(unsigned int*)&g_RoomActionTable[3 * 0xc + 8] == 0) return;   // slot 3 not built
+    if (g_bCostumeVariant == 2) {
+        // In the Saturn outfit: both PC closets open, the Saturn rack is "worn".
+        wardrobe_set_event(4, 3);
+        wardrobe_set_event(5, 0);
+        wardrobe_set_message(3);
+    } else {
+        wardrobe_set_event(3, 0);
+    }
+}
 
 // Texture helpers defined elsewhere
 extern void delete_texture_set_secondary(unsigned char);
@@ -406,6 +457,26 @@ void room_set(void)
 
     printf("etc set end\n");
 
+    // Mod: a loaded save's outfit. The "wearing the alternate outfit" bit
+    // is only in g_main_state_flags2, which game_start resets, so a loaded
+    // game always came back in the default clothes. The save now carries it
+    // (SaveLoadScreen.cpp); put it back on the first room of the load.
+    {
+        extern int g_pendingCostumeOn;
+        if (g_pendingCostumeOn >= 0) {
+            if (g_pendingCostumeOn) g_main_state_flags2 |= MSF2_COSTUME_VARIANT;
+            else                    g_main_state_flags2 &= ~MSF2_COSTUME_VARIANT;
+            g_pendingCostumeOn = -1;
+        }
+    }
+
+    // Mod (testing): [Testing] ArmorKey=1 - see GameStart.cpp.
+    {
+        extern int test_give_armor_key(void);
+        extern void LoadHeldItemsImages(void);
+        if (test_give_armor_key()) LoadHeldItemsImages();
+    }
+
     // 0x00477904: Character model switching logic
     if (g_playerEntity.id != g_CharacterModelId) {
         if ((g_CharacterModelId & 8) == 0) {
@@ -586,6 +657,7 @@ void room_set(void)
 
     // 0x00477c0f: run_command_functions(g_RoomInitScd)
     run_command_functions((unsigned short*)g_RoomInitScd);
+    wardrobe_saturn_setup();     // Mod: the Saturn outfit closet
 
     // 0x00477c21: g_message_flags |= 0x80
     g_message_flags |= 0x80;
@@ -734,6 +806,12 @@ void LoadRoomRdt(void)
             hexDigits[g_roomId & 0xF],
             hexDigits[variant]);
 
+    // Mod: in the Saturn Battle Game g_stageId / g_roomId name the main-game
+    // room a battle room is a copy of (so backgrounds, sounds and every
+    // stage/room table follow it), and only the room file is the battle's
+    // own - the same split the DC arrange rooms use above.
+    const int isBattleRoom = battle_rdt_path(FILE_PATH, sizeof(FILE_PATH));
+
     SetSpriteBufferFlag();
 
     // A failed load leaves the buffer holding the PREVIOUS room, and everything
@@ -742,7 +820,8 @@ void LoadRoomRdt(void)
     // violation a missing RDT produced rather than a clean error. The original
     // never meets one; an overlay can (§0 of the DC port plan calls a
     // half-populated mode tree out as a hazard), so it is checked here.
-    if (LoadFile(FILE_PATH, g_RdtPointer, 1) == (size_t)-1) {
+    const size_t rdtSize = LoadFile(FILE_PATH, g_RdtPointer, 1);
+    if (rdtSize == (size_t)-1) {
         dbg_printf("[room] %s could not be loaded - keeping the previous room's"
                    " RDT rather than relocating through it\n", FILE_PATH);
         return;
@@ -794,6 +873,31 @@ void LoadRoomRdt(void)
     g_RoomInitScd = g_RdtPointer->initialization_scd;
     g_RoomScdOpcodes = g_RdtPointer->scd_opcodes;
     g_RoomEventScripts = g_RdtPointer->scd_opcodes2;
+
+    // Mod: Saturn Battle Game. battle2pc.py appends the Saturn scripts to the
+    // END of the PC room file, i.e. after vab_sound_file. room_set reuses the
+    // buffer from vab_sound_file on for the omodel/item records, the enemy
+    // EMDs and their joint data, so in any room with enemies the per-frame
+    // SCD and the event scripts were overwritten as soon as the models
+    // loaded: garbage opcodes every frame, a black screen with the music
+    // still playing. Keep them in a buffer of their own instead. The init
+    // SCD is copied too, as it sits in the same appended block.
+    if (isBattleRoom) {
+        static unsigned char s_battleScripts[0x8000];
+        unsigned char* base = (unsigned char*)g_RdtPointer;
+        unsigned char* from = (unsigned char*)g_RdtPointer->initialization_scd;
+        unsigned char* end = base + rdtSize;
+        if (from > base && from < end && (size_t)(end - from) <= sizeof(s_battleScripts)) {
+            const size_t n = (size_t)(end - from);
+            memcpy(s_battleScripts, from, n);
+            g_RoomInitScd      = (unsigned char*)(s_battleScripts + ((unsigned char*)g_RoomInitScd - from));
+            g_RoomScdOpcodes   = (unsigned char*)(s_battleScripts + ((unsigned char*)g_RoomScdOpcodes - from));
+            g_RoomEventScripts = (unsigned char*)(s_battleScripts + ((unsigned char*)g_RoomEventScripts - from));
+        } else {
+            dbg_printf("[battle] room scripts not where expected (%u bytes) - left in place\n",
+                       (unsigned int)(end - from));
+        }
+    }
 
     // 0x00477f2d-0x00477f3f: Resolve EVT script relative offsets
     int* evtPtr = (int*)g_RoomEventScripts;

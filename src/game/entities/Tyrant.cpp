@@ -97,7 +97,8 @@
 #include "../../Globals.h"
 #include "../BioCard.h"
 #include "../../DebugPrint.h"
-#include "../SpriteRenderer.h"           // TextureDraw queue + SPRITE_CLASS_*
+#include "../SpriteRenderer.h"
+extern int g_battleEndingCam;   // BattleGame.cpp (Saturn Battle Game ending shot)           // TextureDraw queue + SPRITE_CLASS_*
 #include "../../marni/MarniSystem.h"     // MarniCreateTexture
 #include <cstring>
 #include <cstdlib>
@@ -790,6 +791,7 @@ void tyrant_trail_update(void)
 // ---------------------------------------------------------------------------
 void tyrant_draw_claw_ghosts(void)
 {
+    if (g_battleEndingCam != 0) return;     // Mod: see tyrant_draw_heart
     if (ENTITY->id == 12) return;
 
     JointStruct* joints = ENTITY->jointsStructs;
@@ -855,6 +857,8 @@ void tyrant_draw_claw_ghosts(void)
 // ---------------------------------------------------------------------------
 void tyrant_draw_heart(void)
 {
+    // Mod: never during the Battle Game's ending shot (only the player shows).
+    if (g_battleEndingCam != 0) return;
     if ((ENTITY->has_enter_switch_zone & 0x7f) == 0) return;
 
     Entity* owner = ENTITY;
@@ -2918,8 +2922,924 @@ const TyrantState s_tyrantStates[10] = {
 // ===========================================================================
 // 0x00421990 - per-frame entry, both ids.
 // ===========================================================================
+
+// ===========================================================================
+// Mod (Battle Game, testing): the RE 1.5 Man Spider (em id 0x2B in the
+// Biohazard 2 prototype), in room 15 instead of the Golden Tyrant.
+//
+// Ported from the prototype's own AI: PSX STAGE5.BIN (loaded at 0x80100000),
+// registered for id 0x2B at 0x80072c58 (the move table at 0x80072bac). Main
+// routine 0x80111a50; routine table 0x8011fc1c (0 init, 1 move, 2 damage,
+// 3 die); behaviours 0x8011fc3c (checks) / 0x8011fc7c (actions). The full
+// disassembly is tools/re15/manspider_ai_1.5.asm. Distances, cones, timers,
+// turn rates, damage, cooldowns and clip numbers are the prototype's.
+//
+// Model: enemy/em1018.emd (tools/saturn/manspider2pc.py). Its animation set B
+// holds the 1.5 clips in their own numbering, so ty_anim() takes them as-is;
+// set A stays the Tyrant's (the player's side of a hit).
+//
+// Not ported yet: the lethal grabs (behaviours 5/8/9/10/15, which need the
+// paired player animations), the scripted ceiling/wall entrances (12, routine
+// 4) and the spit projectile's own object (the spit hits at the release frame).
+// ===========================================================================
+void ms_snd_play(int id);   // SoundSystem.cpp (mod): RE 1.5 Man Spider sounds
+extern bool g_bManSpiderAlwaysDecap;   // config [BattleGame] ManSpiderAlwaysDecapitate
+void crashlog_mark(const char* step);
+// SpriteRenderer.cpp (mod)
+int SubmitDisc(int cx16, int cy16, int radius16, unsigned short depth,
+               float r, float g, float b, float alpha);
+
+namespace {
+
+struct ManSpiderAI {
+    unsigned char beh;      // 1.5 em+5  (behaviour)
+    unsigned char sub;      // 1.5 em+6  (behaviour sub-state)
+    unsigned char r3;       // 1.5 em+7  (roar -> back to idle)
+    unsigned char turn;     // 1.5 em+158 (turn rate / wait counter)
+    short         timer;    // 1.5 em+156
+    short         cool;     // 1.5 em+478 (attack cooldown)
+    short         spit;     // 1.5 em+476 (100 = spit armed)
+    unsigned char hit;      // damage already dealt this swing
+    unsigned char rmValid;  // previous foot position is valid
+    unsigned char crawl;    // last posture: 1 = on all fours
+    unsigned char deathDone;
+    unsigned char walking;  // moved under its own power this frame
+    unsigned char stuck;    // frames spent pushed back by a wall
+    unsigned char keepRoot; // grab clips: keep the root's X/Z (aligns him with the player)
+    unsigned char grabbed;  // the player is held
+};
+ManSpiderAI ms;
+bool ms_can_grab(void);
+void ms_b5(void);
+void ms_b8(void);
+void ms_player_release(void);
+void ms_player_fling(void);
+
+// 1.5 em health table row for id 0x2B (0x8011e108 + 0x2b*32).
+const short s_msHealth[16] = { 86, 89, 103, 119, 91, 107, 121, 93,
+                               109, 124, 117, 97, 113, 126, 99, 101 };
+
+void ms_anim(unsigned char a)
+{
+    ty_anim() = a;
+    ty_frame() = 0;
+    eub(ENTITY, 0xbf) = 0;
+    eub(ENTITY, 0x8c) = 7;          // blend in over 7 frames (1.5 em+143 = 7)
+    ms.rmValid = 0;
+}
+
+int ms_step(void)
+{
+    int r = (int)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x200);
+    // The 1.5 clips carry the body's travel in the root joint's X/Z offset
+    // (the 1.5 engine moved the entity separately). Left in, it slides the
+    // drawn model metres away from the real position each loop - the
+    // "teleporting" crawl. Keep only the root height.
+    if (ENTITY->jointsStructs && !ms.keepRoot) {
+        ENTITY->jointsStructs[0].transform.t[0] = 0;
+        ENTITY->jointsStructs[0].transform.t[2] = 0;
+    }
+    return r;
+}
+
+int ms_dist(void)
+{
+    int dx = g_playerEntity.scaMatrixData.localMatrix.t[0] - ei(ENTITY, 0x34);
+    int dz = g_playerEntity.scaMatrixData.localMatrix.t[2] - ei(ENTITY, 0x3c);
+    long long d2 = (long long)dx * dx + (long long)dz * dz;
+    if (d2 > 0x7fffffffLL) return 0xffff;
+    return SquareRoot0((int)d2);
+}
+
+// 1.5 0x8001a804(range, cone): the player is within `range` and within `cone`
+// of the facing (cone = half-width in 4096ths of a turn).
+bool ms_in_cone(int range, int cone)
+{
+    if (ms_dist() >= range) return false;
+    short yaw = (short)getAngleTowardsTarget(g_playerEntity.scaMatrixData.localMatrix.t[0],
+                                             g_playerEntity.scaMatrixData.localMatrix.t[2]);
+    int d = ((yaw - ENTITY->angle + 0x800) & 0xfff) - 0x800;
+    return d < cone && d > -cone;
+}
+
+bool ms_player_dead(void) { return (eub(&g_playerEntity, 0x89) & 0x80) != 0; }
+
+int ms_player_max(void) { return (g_playerEntity.id & 1) ? 96 : 140; }
+
+// 1.5 damage is out of 200; scale to this player's maximum.
+void ms_hurt_player(int dmg15)
+{
+    int d = dmg15 * ms_player_max() / 200;
+    if (d < 1) d = 1;
+    tyrant_damage_player(d, d);
+    g_playerEntity.animationId = 6;
+    g_playerEntity.animFrameId = 0xc;
+    g_playerEntity.action_behavior = 1;
+    g_playerEntity.action_state = 0;
+    tyrant_latch_player_attacker(0);
+    Snd_em(2);
+}
+
+// 1.5 0x80115d6c: plant one foot (leg chain 19-21, or 22-24) and move the body
+// by how far that foot slid since it was last drawn - the walk's root motion.
+void ms_root_motion(int leg)
+{
+    JointStruct* j = ENTITY->jointsStructs;
+    if (j == nullptr || ENTITY->jointCount < 25) return;
+    int a = leg ? 22 : 19;
+    RotMatrix(reinterpret_cast<SVECTOR*>(&ENTITY->position.pad), &ENTITY->scaMatrixData.localMatrix);
+    ApplyLVAndMul0Matrix(&ENTITY->scaMatrixData.localMatrix, &j[0].transform, &g_matrixScratch);
+    for (int k = a; k < a + 3; k++) ApplyLVAndMulMatrix(&g_matrixScratch, &j[k].transform);
+    // The planted foot is remembered here, in room space (the joints' own
+    // world matrices are camera-relative, so they cannot be compared).
+    static int s_footX, s_footZ, s_leg = -1;
+    int fx = g_matrixScratch.t[0], fz = g_matrixScratch.t[2];
+    if (!ms.rmValid || s_leg != leg) {
+        ms.rmValid = 1; s_leg = leg; s_footX = fx; s_footZ = fz;
+        return;
+    }
+    int dx = fx - s_footX, dz = fz - s_footZ;
+    if (dx > 400 || dx < -400 || dz > 400 || dz < -400) {   // a pose jump, not a step
+        s_footX = fx; s_footZ = fz;
+        return;
+    }
+    ei(ENTITY, 0x34) -= dx;          // the foot stays where it was put down
+    ei(ENTITY, 0x3c) -= dz;
+}
+
+// Walk speed from the clip itself: the 1.5 frame header's stride value (the
+// per-frame speed field, unused by the joint player) / 4 - the distance the
+// planted foot actually travels per frame in these clips.
+void ms_walk(void)
+{
+    if (ENTITY->animBase == 0) return;
+    unsigned int base = ENTITY->animBase;
+    unsigned short* slot = (unsigned short*)(base + (unsigned int)ty_anim() * 4);
+    unsigned short* fe = (unsigned short*)((slot[1] & 0xFFFFFFFC) + (unsigned int)ty_frame() * 4 + base);
+    unsigned int hdr = ENTITY->animHeader;
+    short stride = *(short*)(hdr + 6);
+    short* fr = (short*)(hdr + ((int)*(short*)(hdr + 2) & ~3) + (unsigned int)fe[0] * (stride & ~1));
+    (void)fr;
+    // Fixed ground speeds (RE1 units; the Tyrant walks at 300). The clip's
+    // stride field read far too fast in this engine.
+    ty_speed() = (short)(ms.crawl ? 135 : 100);
+    ms.walking = 1;
+    Add_speedXZ(0);
+    ty_speed() = 0;
+}
+
+// Obstacle detour. Turning harder at the player only grinds him along a
+// blocking console, so once the collision has held him back for a few frames
+// he walks off at 90 degrees to the player's bearing for a short while, then
+// heads for the player again. Still blocked mid-detour: try the other side,
+// then a wider angle.
+struct MsDetour { short frames; signed char side; unsigned char tries; };
+MsDetour s_det;
+
+void ms_turn(int rate)
+{
+    int px = g_playerEntity.scaMatrixData.localMatrix.t[0];
+    int pz = g_playerEntity.scaMatrixData.localMatrix.t[2];
+    // (pressing against the player also reads as blocked - not a detour)
+    if (ms.stuck > 6 && ms_dist() > 1600) {
+        s_det.side = (s_det.tries & 1) ? (signed char)-s_det.side : (s_det.side ? s_det.side : (signed char)((rand() & 1) ? 1 : -1));
+        s_det.frames = (short)(28 + 10 * (s_det.tries & 3));
+        s_det.tries++;
+        ms.stuck = 0;
+    }
+    if (s_det.frames > 0) {
+        s_det.frames--;
+        int bearing = (short)getAngleTowardsTarget(px, pz);
+        int a = bearing + s_det.side * (s_det.tries > 2 ? 0x500 : 0x400);
+        VECTOR t;
+        SVECTOR o = { 2000, 0, 0, 0 }, r;
+        MATRIX m = g_identityMatrixData;
+        RotMatrixY(a, &m);
+        ApplyMatrixSV(&m, &o, &r);
+        t.x = ei(ENTITY, 0x34) + r.x; t.y = 0; t.z = ei(ENTITY, 0x3c) + r.z; t.pad = 0;
+        entity_rotate_toward_target(&t, 0x80);
+        if (s_det.frames == 0 && ms.stuck == 0) s_det.tries = 0;   // got round it
+        return;
+    }
+    entity_rotate_toward_target((VECTOR*)ty_playerT(), (unsigned short)rate);
+}
+
+void ms_go(unsigned char b) { ms.beh = b; ms.sub = 0; }
+
+// Shot from the front (1.5: em+436 hit bits with the shot direction inside
+// +-90 degrees of the facing) - checked by the damage state instead, see below.
+
+// --- behaviours (1.5 check / action pairs) -----------------------------------
+
+// 0: idle on all fours (0x80112014 / 0x80112064)
+void ms_b0(void)
+{
+    if (!ms_player_dead() && ms_dist() < 8000) { ms_go(ms.r3 ? 1 : 2); ms.r3 = 1; return; }   // roar only once
+    if (ms.sub == 0) {
+        ms.timer = (short)((rand() & 0x7fff) % 64 + 59);
+        ms.sub = 1;
+        ms_anim(0);
+        ms.crawl = 1;
+    }
+    if (ms.timer-- == 0) { ms_go(1); return; }
+    ms_step();
+}
+
+// 1: prowl toward the player on all fours (0x801121a4 / 0x801122a4)
+void ms_b1(void)
+{
+    if (!ms_player_dead() && ms_in_cone(8000, 0xc0)) { ms_go(3); return; }
+    if (ms.sub == 0) {
+        ms.sub = 1;
+        ms_anim(1);
+        ms.crawl = 1;
+        ms.turn = (unsigned char)((rand() & 0xf) + 0x28);
+    }
+    ms_turn(ms.turn);
+    ms_step();
+    if (ty_frame() % 12 == 11) ms_snd_play(6);
+    ms_walk();
+}
+
+// 2: rear up and roar (0x8011240c / 0x80112414)
+void ms_b2(void)
+{
+    if (ms.sub == 0) { ms.sub = 1; ms_anim(2); ms_snd_play(1); }
+    if (ms.sub == 1) {
+        ms.sub = (unsigned char)(ms.sub + ms_step());
+        return;
+    }
+    ms.crawl = 0;
+    ms.r3 = 1;
+    ms_go(3);
+}
+
+// 3: stalk upright (0x80112568 / 0x8011275c)
+void ms_b3(void)
+{
+    if (!ms_player_dead()) {
+        int dist = ms_dist();
+        if (ms.cool == 0 && dist > 2500 && dist < 9000 && ms_in_cone(9000, 0x100) &&
+            (rand() % 45) == 0) {
+            ms.spit = 100;
+            ms_go(7);
+            return;
+        }
+        if (ms_in_cone(1500, 0x180) && ms.cool == 0 && ms_can_grab() &&
+            (g_bManSpiderAlwaysDecap || (rand() % 3) == 0)) { ms_go(5); return; }
+        if (ms_in_cone(1500, 0x180) && ms.cool == 0) { ms_go(4); return; }
+    }
+    if (ms.sub == 0) {
+        ms.sub = 1;
+        ms.turn = (unsigned char)((rand() & 0x1f) + 64);
+        ms_anim(3);
+        ms.crawl = 0;
+    }
+    ms_turn(ms.turn);
+    ms_step();
+    if (ty_frame() % 7 == 6) ms_snd_play(5);
+    ms_walk();
+}
+
+// --- Grab and decapitation (1.5 behaviours 5 and 8) -----------------------
+// 1.5 plays the PLAYER's side from the Man Spider's own file (sections 5/6);
+// manspider2pc.py retargets those clips onto the RE1 skeleton and appends them
+// to set A (the player-reaction set the engine points emdScratchPtr1/2 at) as
+// clips 3-6. Both bodies stand on one shared anchor and the clips' root
+// offsets put them in place, as the 1.5 anchor helper (0x8001ac38) does.
+//   enemy 14 lunge   / player 3      enemy 16 throw-off / player 5
+//   enemy 15 hold    / player 4      enemy 17 decapitate / player 6
+const unsigned char kMsGrabPlayerClip0 = 3;
+
+bool ms_can_grab(void)
+{
+    return !ms_player_dead() && g_playerEntity.health > 0 &&
+           g_playerEntity.isBeingAttackedFlag == 0 &&
+           g_playerEntity.emdScratchPtr1 != 0;
+}
+
+// Pose the player on the given set-A clip/frame and pin them to the anchor.
+int s_msSlide;     // throw: how far the player has been carried off the anchor
+
+void ms_player_pose(unsigned char clip, unsigned char frame)
+{
+    Entity* pe = reinterpret_cast<Entity*>(&g_playerEntity);
+    int ox = 0, oz = 0;
+    if (s_msSlide) {
+        SVECTOR o = { (short)s_msSlide, 0, 0, 0 }, r;
+        MATRIX m = g_identityMatrixData;
+        RotMatrixY((short)ENTITY->angle, &m);
+        ApplyMatrixSV(&m, &o, &r);
+        ox = r.x; oz = r.z;
+    }
+    g_playerEntity.scaMatrixData.localMatrix.t[0] = ei(ENTITY, 0x34) + ox;
+    g_playerEntity.scaMatrixData.localMatrix.t[2] = ei(ENTITY, 0x3c) + oz;
+    g_playerEntity.directionAngle = (short)(ENTITY->angle + 0x800);   // facing him
+    Entity* save = ENTITY;
+    ENTITY = pe;
+    unsigned short* slot = (unsigned short*)(g_playerEntity.emdScratchPtr2 + (unsigned int)clip * 4);
+    unsigned char last = (unsigned char)(slot[0] ? slot[0] - 1 : 0);
+    pe->animationId = clip;
+    pe->animation_frame_id = frame > last ? last : frame;
+    pe->timing_control = 0;
+    pe->blend_counter = 0;
+    Joint_move(0, g_playerEntity.emdScratchPtr1, g_playerEntity.emdScratchPtr2, 0x400);
+    ENTITY = save;
+}
+
+void ms_player_take(void)
+{
+    g_playerEntity.isBeingAttackedFlag = 1;
+    g_playerEntity.animationId = 6;           // -> player_anim_limb_physics
+    g_playerEntity.animFrameId = 0xc;
+    g_playerEntity.action_behavior = 3;       // DAT_004ba360[3]: player_manspider_held
+    g_playerEntity.action_state = 0;
+    g_playerEntity.unk_b8 = (unsigned int)(uintptr_t)ENTITY;
+    ms.grabbed = 1;
+}
+
+void ms_player_release(void)
+{
+    g_playerEntity.animationId = 1;
+    g_playerEntity.animFrameId = 0;
+    g_playerEntity.action_behavior = 0;
+    g_playerEntity.action_state = 0;
+    g_playerEntity.isBeingAttackedFlag = 0;
+    ms.grabbed = 0;
+}
+
+// Throw-off. The 1.5 throw clip leaves the player on his anchor - inside his
+// body in this engine - so the player is flung clear instead: set down 1100
+// units in front of him, facing him, and knocked back along the floor with
+// the Tyrant's knock-down clip (set A clip 2) by player_manspider_held below.
+int g_msFling;    // read by player_manspider_held (outside the namespace)
+
+void ms_player_fling(void)
+{
+    SVECTOR o = { 1100, 0, 0, 0 }, r;
+    MATRIX m = g_identityMatrixData;
+    RotMatrixY((short)ENTITY->angle, &m);
+    ApplyMatrixSV(&m, &o, &r);
+    g_playerEntity.scaMatrixData.localMatrix.t[0] = ei(ENTITY, 0x34) + r.x;
+    g_playerEntity.scaMatrixData.localMatrix.t[2] = ei(ENTITY, 0x3c) + r.z;
+    g_playerEntity.directionAngle = (short)(ENTITY->angle + 0x800);
+    int d = 40 * ms_player_max() / 200;
+    tyrant_damage_player(d, d);
+    Play3DSnd(3, 2, 0, (int)g_playerEntity.scaMatrixData.localMatrix.t);
+    g_playerEntity.animationId = 6;
+    g_playerEntity.animFrameId = 0xc;
+    g_playerEntity.action_behavior = 3;
+    g_playerEntity.action_state = 0;
+    g_playerEntity.isBeingAttackedFlag = 1;
+    g_msFling = 1;
+    ms.grabbed = 0;
+    ms.keepRoot = 0;
+}
+
+// 5: lunge, hold, then throw off or decapitate (0x80112bdc / 0x80112be4)
+void ms_b5(void)
+{
+    switch (ms.sub) {
+    case 0:                                   // lunge (clip 14)
+        ms.sub = 1;
+        ms.keepRoot = 0;
+        ms_anim(14);
+        ms_snd_play(3);
+        // fall through
+    case 1:
+        ms_turn(0x40);
+        if (ms_step()) { ms.cool = 45; ms_go(3); return; }       // missed
+        if (ty_frame() >= 4 && ms_can_grab() && ms_in_cone(1900, 0x300)) {   // 1300 missed the first lunge
+            ms_player_take();
+            ms.keepRoot = 1;
+            ms.sub = 2;
+            ms_anim(15);
+            eub(ENTITY, 0x8c) = 0;            // no blend: the clips are paired
+            ms.timer = 100;
+            ms_player_pose(kMsGrabPlayerClip0 + 1, 0);
+            Play3DSnd(3, 2, 0, (int)g_playerEntity.scaMatrixData.localMatrix.t);   // cry out
+        }
+        return;
+    case 2: {                                 // hold (clip 15, loops)
+        ms_step();
+        ms_player_pose(kMsGrabPlayerClip0 + 1, ty_frame());
+        if (ms.timer == 92 || ms.timer == 80)                          // the squeeze
+            Play3DSnd(2, 0x1d, 0, (int)g_playerEntity.scaMatrixData.localMatrix.t);
+        if (ms.timer == 84) Play3DSnd(3, 2, 0, (int)g_playerEntity.scaMatrixData.localMatrix.t);
+        if (--ms.timer > 70) return;
+        bool kill = g_bManSpiderAlwaysDecap ||
+                    g_playerEntity.health <= 60 * ms_player_max() / 200;
+        if (kill) { ms_go(8); return; }
+        ms.sub = 3;
+        ms_anim(16);
+        eub(ENTITY, 0x8c) = 0;
+        ms_snd_play(0);
+        s_msSlide = 0;
+        return;
+    }
+    case 3: {                                 // throw off (clip 16 / player 5)
+        // The 1.5 throw lifts the player and drops them back on his anchor
+        // (inside his body here), so carry them away from him over the swing
+        // and the fall: 0 -> 1500 units between frames 14 and 40.
+        unsigned char f = ty_frame();
+        // Carry only once he lets go (root drops from frame ~24, floor by 36),
+        // easing out, so it reads as being thrown rather than walked back.
+        if (f >= 24 && f <= 38) { int t = f - 24; s_msSlide = 1500 - (14 - t) * (14 - t) * 1500 / 196; }
+        if (f > 38) s_msSlide = 1500;
+        if (f == 34) {
+            int d = 40 * ms_player_max() / 200;
+            tyrant_damage_player(d, d);
+            Play3DSnd(3, 2, 0, (int)g_playerEntity.scaMatrixData.localMatrix.t);
+        }
+        // the clip's last frame is a bare (unrotated) pose - stop one short
+        unsigned short* slot = (unsigned short*)(g_playerEntity.emdScratchPtr2 + (kMsGrabPlayerClip0 + 2) * 4);
+        unsigned char lastUseful = (unsigned char)(slot[0] >= 2 ? slot[0] - 2 : 0);
+        if (ms_step() || f >= lastUseful) {
+            ms_player_pose(kMsGrabPlayerClip0 + 2, lastUseful);
+            // (manspider2pc.py takes the 1.5 root half-turn out of these
+            // clips, so the heading used while posed is the on-screen facing.)
+            ms_player_release();
+            g_playerEntity.directionAngle = (short)(ENTITY->angle + 0x800);
+            check_room_collision((VECTOR*)g_playerEntity.scaMatrixData.localMatrix.t,
+                                 *(short*)((char*)(uintptr_t)g_playerEntity.Sca_info + 10));
+            s_msSlide = 0;
+            ms.keepRoot = 0;
+            ms.cool = 60;
+            ms_go(3);
+            return;
+        }
+        ms_player_pose(kMsGrabPlayerClip0 + 2, f);
+        return;
+    }
+    }
+}
+
+// 8: decapitation (0x80112f98 / 0x80112fa0)
+void ms_b8(void)
+{
+    if (ms.sub == 0) {
+        ms.sub = 1;
+        ms.keepRoot = 1;
+        ms_anim(17);
+        eub(ENTITY, 0x8c) = 0;
+        ms_snd_play(8);
+        ms.timer = 0;
+    }
+    if (ms.sub == 1) {
+        unsigned char f = ty_frame();
+        int* pp = g_playerEntity.scaMatrixData.localMatrix.t;
+        if (f == 2)  Play3DSnd(3, 3, 0, (int)pp);          // death scream
+        if (f == 18 || f == 44) Play3DSnd(2, 0x1d, 0, (int)pp);   // crunch
+        if (f == 60) Play3DSnd(2, 0x1e, 0, (int)pp);
+        if (ms_step()) { ms.sub = 2; return; }
+        if (f < 80) { ms_player_pose(kMsGrabPlayerClip0 + 3, f); return; }
+        // Frame 80: he drops the body at standing height. Hand the player to
+        // the game's own death (state 3) so they collapse and lie like any
+        // other kill, instead of the retargeted 1.5 floor pose.
+        if (ms.grabbed) {
+            ms.grabbed = 0;
+            g_playerEntity.health = -1;
+            g_playerEntity.animationId = 3;
+            g_playerEntity.animFrameId = 0;
+            g_playerEntity.action_behavior = 0;
+            g_playerEntity.action_state = 0;
+        }
+        return;
+    }
+    // finished: rear up and roar over the body (clip 2), then idle
+    if (ms.sub == 2) {
+        ms.sub = 3;
+        ms.keepRoot = 0;
+        ms.crawl = 0;
+        ms_anim(2);
+        ms_snd_play(1);
+        return;
+    }
+    if (ms.sub == 3) {
+        if (ms_step()) { ms.sub = 4; ms_anim(0); }
+        return;
+    }
+    ms_step();                                // idle on the spot
+}
+
+// 4: claw swipe (0x801128d4 / 0x801128dc)
+void ms_b4(void)
+{
+    switch (ms.sub) {
+    case 0:
+        ms.sub = 1;
+        ms.hit = 0;
+        ms_anim(12);
+        ms_snd_play(3);
+        // fall through
+    case 1:
+        if (ty_frame() < 10) ms_turn(0x40);
+        ms.sub = (unsigned char)(ms.sub + ms_step());
+        if (ms.sub == 1 && !ms.hit && ty_frame() >= 10 && !ms_player_dead() &&
+            ms_in_cone(2700, 0x280)) {
+            ms.hit = 1;
+            ms_hurt_player(40);   // 1.5 value 10 felt far too weak here
+        }
+        break;
+    case 2:
+        ms.sub = 3;
+        ms_anim(13);
+        ms.turn = 10;
+        // fall through
+    case 3:
+        ms.sub = (unsigned char)(ms.sub + ms_step());
+        break;
+    default:
+        if (ms.turn-- == 0) { ms.cool = 45; ms_go(3); }
+        break;
+    }
+}
+
+// --- Acid spit projectile (mod approximation: a green glob) -----------------
+// 1.5 throws a separate spit object; its look is unknown, so this is a small
+// translucent green ball that flies at the player's chest and splashes.
+struct MsSpit { int on, x, y, z, vx, vy, vz, life, splash; };
+MsSpit s_spit[3];
+
+
+void ms_spit_fire(void)
+{
+    MsSpit* p = nullptr;
+    for (auto& q : s_spit) if (!q.on) { p = &q; break; }
+    if (!p) return;
+    int sx = ei(ENTITY, 0x34), sz = ei(ENTITY, 0x3c);
+    int ang = (int)(short)ENTITY->angle;
+    // mouth: ~700 units ahead of the body, at head height
+    {
+        SVECTOR o = { 700, 0, 0, 0 }, r;
+        MATRIX m = g_identityMatrixData;          // same forward axis as Add_speedXZ
+        RotMatrixY(ang, &m);
+        ApplyMatrixSV(&m, &o, &r);
+        sx += r.x; sz += r.z;
+    }
+    int sy = ms.crawl ? -700 : -1500;
+    int tx = g_playerEntity.scaMatrixData.localMatrix.t[0];
+    int tz = g_playerEntity.scaMatrixData.localMatrix.t[2];
+    int ty = -1100;
+    int dx = tx - sx, dy = ty - sy, dz = tz - sz;
+    long long dd = (long long)dx * dx + (long long)dz * dz;
+    int d = SquareRoot0((int)(dd > 0x7fffffffLL ? 0x7fffffffLL : dd));
+    if (d < 1) d = 1;
+    const int speed = 220;                      // units per frame
+    p->on = 1; p->splash = 0; p->life = 60;
+    p->x = sx; p->y = sy; p->z = sz;
+    p->vx = dx * speed / d; p->vz = dz * speed / d;
+    p->vy = dy * speed / (d > 1 ? d : 1);
+    char m[128];
+    sprintf(m, "spit fire x%d y%d z%d v%d,%d,%d d%d", sx, sy, sz, p->vx, p->vy, p->vz, d);
+    crashlog_mark(m);
+}
+
+void ms_spit_update_draw(void)
+{
+    tyrant_trail_camera_setup(true);
+    const float f = (float)g_sceneRenderParam;
+    for (auto& p : s_spit) {
+        if (!p.on) continue;
+        if (p.splash) {
+            p.splash--;
+            if (p.splash == 0) { p.on = 0; continue; }
+        } else {
+            p.x += p.vx; p.y += p.vy; p.z += p.vz;
+            if (--p.life <= 0) { p.splash = 8; }
+            int dx = g_playerEntity.scaMatrixData.localMatrix.t[0] - p.x;
+            int dz = g_playerEntity.scaMatrixData.localMatrix.t[2] - p.z;
+            if (!p.splash && dx < 450 && dx > -450 && dz < 450 && dz > -450 && !ms_player_dead()) {
+                ms_hurt_player(40);   // 1.5 value 10 felt far too weak here
+                p.splash = 10;
+                crashlog_mark("spit hit player");
+            }
+            if (p.y > -50) p.splash = 8;             // hit the floor
+        }
+        VECTOR w = { p.x, p.y, p.z, 0 };
+        TyTrailView v;
+        tyrant_trail_project_corner(w, &v);
+        if ((p.life & 7) == 0) {
+            char m[128];
+            sprintf(m, "spit at x%d y%d z%d nz%d life%d spl%d", p.x, p.y, p.z, v.nz, p.life, p.splash);
+            crashlog_mark(m);
+        }
+        if (v.nz < TY_TRAIL_NEAR_Z) continue;
+        float sx = (float)v.nx * f / (float)v.nz + 160.0f;
+        float sy = (float)v.ny * f / (float)v.nz + 120.0f;
+        float rad = (p.splash ? 160.0f + 30.0f * (10 - p.splash) : 110.0f) * f / (float)v.nz;
+        float a = p.splash ? 0.08f * p.splash : 0.85f;
+        SubmitDisc((int)(sx * 16), (int)(sy * 16), (int)(rad * 16), 1, 0.35f, 0.95f, 0.15f, a);
+        SubmitDisc((int)(sx * 16), (int)(sy * 16), (int)(rad * 8), 1, 0.75f, 1.0f, 0.45f, a);
+    }
+}
+
+// The Black Tiger's acid glob (effect 0x1E, borrowed into this room by
+// EffectSprites.cpp), one instead of its three, aimed straight ahead. The
+// effect flies along the spitter's facing, so he snaps to face the player.
+void ms_spit_acid(void)
+{
+    ENTITY->angle = (short)getAngleTowardsTarget(g_playerEntity.scaMatrixData.localMatrix.t[0],
+                                                 g_playerEntity.scaMatrixData.localMatrix.t[2]);
+    RotMatrix(reinterpret_cast<SVECTOR*>(&ENTITY->position.pad), &ENTITY->scaMatrixData.localMatrix);
+    g_playerPosScratch.x = 700;
+    g_playerPosScratch.y = ms.crawl ? -600 : -1400;
+    g_playerPosScratch.z = 0;
+    Effect_CreateBillboard(0x1E, 0, 0, (void*)((char*)ENTITY + 0x20), &g_playerPosScratch, 0);
+    crashlog_mark("spit acid (0x1E)");
+}
+
+// Faster acid: give every live glob a second horizontal integration step.
+void ms_acid_boost(void)
+{
+    for (int i = 0; i < 64; i++) {
+        Effect* e = &g_effectPool[i];
+        if (e->animId == 0 || e->effectType != 0x1E) continue;
+        e->rotSpeedX = (short)(e->rotSpeedX + *(short*)&e->animHeader[0xc]);
+        e->rotSpeedZ = (short)(e->rotSpeedZ + *(short*)&e->animHeader[0x10]);
+    }
+}
+
+// 7: hiss / spit (0x80114740 / 0x80114748)
+void ms_b7(void)
+{
+    if (ms.sub == 0) {
+        ms.sub = 1;
+        ms.hit = 0;
+        ms.turn = 1;
+        ms_anim(4);
+        if (ms.spit == 100 && ms_in_cone(0x7fff, 0x400)) {
+            ms_anim(5);
+            ms.turn = 0;
+            ms.spit = 0;
+        }
+        if (ty_anim() == 5) { ms_snd_play(10); ms.cool = 45; }
+    }
+    if (ms.sub == 1) {
+        ms_turn(ms.turn ? 0x40 : 0);
+        ms.sub = (unsigned char)(ms.sub + ms_step());
+        if (ty_anim() == 5 && !ms.hit && ty_frame() >= 10) {
+            ms.hit = 1;
+            ms_spit_acid();
+        }
+        return;
+    }
+    ms_go(ms.crawl ? 13 : 3);
+}
+
+// 11: shot from the front - drop and dash back, then fight on all fours
+// (0x801135b0 / 0x801135b8)
+void ms_b11(void)
+{
+    if (ms.sub == 0) { ms.sub = 1; ms_anim(22); ms.crawl = 1; ms_snd_play(8); }
+    if (ty_frame() < 9) {
+        ty_speed() = (short)(120 - 12 * ty_frame());    // 1.5: 1600 for 9 frames, toned down
+        Add_speedXZ(0x800);
+        ty_speed() = 0;
+    }
+    if (ms_step()) ms_go(13);
+}
+
+// 13: crawl in (0x80113df4 / 0x80113ebc)
+void ms_b13(void)
+{
+    if (g_bManSpiderAlwaysDecap && !ms_player_dead() && ms_dist() < 1500 && ms.cool == 0 &&
+        ms_can_grab()) { ms.crawl = 0; ms_go(5); return; }
+    if (!ms_player_dead() && ms_dist() < 1500 && ms.cool == 0) { ms_go(14); return; }
+    if (ms.sub == 0) {
+        ms.sub = 1;
+        ms_anim(1);
+        ms.crawl = 1;
+        ms.turn = 0x30;
+        ms.timer = 150;                 // rear up again if the bite never lands
+    }
+    if (ms.timer-- <= 0) { ms_go(2); return; }
+    ms_turn(ms.turn);
+    ms_step();
+    if (ty_frame() % 12 == 11) ms_snd_play(6);
+    ms_walk();
+}
+
+// 14: bite from all fours (0x80113fc0 / 0x80113fc8)
+void ms_b14(void)
+{
+    switch (ms.sub) {
+    case 0:
+        ms.sub = 1;
+        ms.hit = 0;
+        ms_anim(23);
+        ms_snd_play(3);
+        // fall through
+    case 1:
+        if (ty_frame() < 8) ms_turn(0x40);
+        ms.sub = (unsigned char)(ms.sub + ms_step());
+        if (ms.sub == 1 && !ms.hit && ty_frame() >= 7 && ty_frame() <= 14 &&
+            !ms_player_dead() && ms_in_cone(2500, 0x280)) {
+            ms.hit = 1;
+            ms_hurt_player(40);   // 1.5 value 10 felt far too weak here
+        }
+        break;
+    default:
+        ms.cool = 30;
+        ms_go(13);
+        break;
+    }
+}
+
+void ms_behave(void)
+{
+    switch (ms.beh) {
+    case 0:  ms_b0();  break;
+    case 1:  ms_b1();  break;
+    case 2:  ms_b2();  break;
+    case 3:  ms_b3();  break;
+    case 4:  ms_b4();  break;
+    case 7:  ms_b7();  break;
+    case 11: ms_b11(); break;
+    case 13: ms_b13(); break;
+    case 14: ms_b14(); break;
+    case 5:  ms_b5();  break;
+    case 8:  ms_b8();  break;
+    default: ms_go(ms.crawl ? 13 : 3); break;   // grab / scripted ones not ported
+    }
+    if (ms.cool > 0) ms.cool--;
+}
+
+// Routine 0 (0x80111be4)
+void ms_init(void)
+{
+    memset(&ms, 0, sizeof(ms));
+    memset(&s_det, 0, sizeof(s_det));
+    memset(s_spit, 0, sizeof(s_spit));
+    ENTITY->scaMatrixData.field_00 = 0;
+    ENTITY->hit_state = 0;
+    ResetJointTransforms();
+    ENTITY->health = (short)(s_msHealth[rand() & 15] * 3);   // ~300: 1.5 values x3 for RE1 weapon damage
+    ENTITY->Sca_info = (unsigned int)(uintptr_t)s_tyrantScaInfo;
+    ENTITY->lookAtJointIdx = 0;
+    ENTITY->lookAtFlags = 0;
+    set_state_word(0x00000001);            // state 1, behaviour 0
+    ms.crawl = 1;
+    ms_go(0);
+}
+
+// Routine 1
+void ms_state1(void)
+{
+    ENTITY->ignore_player_flag = 0;
+    ENTITY->hit_state = 0;      // weapons only hit an enemy whose hit_state is clear
+    ENTITY->status_flags |= 0xE0;   // hittable at every aim height (up / level / down)
+    ms_behave();
+}
+
+// Routine 2 (0x801148f0): flinch (7 standing, 4 on all fours), then the spit
+// (behaviour 7 with em+476 = 100). Shot from the front while stalking or
+// prowling, the 1.5 drops to the dodge (behaviour 11) instead.
+void ms_state_hit(void)
+{
+    if (ms.grabbed) { ms_player_release(); ms.keepRoot = 0; }
+    if (ENTITY->ignore_player_flag == 0) {
+        ENTITY->ignore_player_flag = 1;
+        short yaw = (short)getAngleTowardsTarget(g_playerEntity.scaMatrixData.localMatrix.t[0],
+                                                 g_playerEntity.scaMatrixData.localMatrix.t[2]);
+        int d = ((yaw - ENTITY->angle + 0x800) & 0xfff) - 0x800;
+        bool front = d < 0x400 && d > -0x400;
+        tyrant_load_fx_anchor(-0x834);
+        Effect_CreateBillboard(0, 0, yaw, &ENTITY->scaMatrixData.localMatrix, &g_playerPosScratch, 0);
+        if (front && (ms.beh == 1 || ms.beh == 3) && (rand() % 3) == 0) {
+            ENTITY->state = 1;
+            ENTITY->ignore_player_flag = 0;
+            ms_go(11);
+            return;
+        }
+        ms_anim(ms.crawl ? 4 : 7); ms_snd_play(9);
+        ms.timer = 10;              // shortened hit stun: ~1/3 s instead of the full clip
+    }
+    if (ms_step() || --ms.timer <= 0) {
+        ENTITY->state = 1;
+        ENTITY->ignore_player_flag = 0;
+        if ((rand() % 3) == 0) { ms.spit = 100; ms_go(7); }   // sometimes answers with a spit
+        else ms_go(ms.crawl ? 13 : 3);                        // otherwise straight back at you
+    }
+}
+
+// Routine 3 (0x80114de8): heavy hit (8 / 9) then the death fall (10 standing,
+// 11 on all fours); raises the room's death flag once.
+void ms_state_die(void)
+{
+    if (ms.grabbed) { ms_player_release(); ms.keepRoot = 0; }
+    if (ENTITY->ignore_player_flag == 0) {
+        ENTITY->ignore_player_flag = 1;
+        Flg_on((int)g_EnemiesFlags, ENTITY->death_event_id);
+        ms.sub = 0;
+        ms.deathDone = 0;
+        // Straight into the death fall. The heavy-hit clip (8 / 9) ends with
+        // him already on the floor, and the fall starts from his feet, so
+        // chaining them made him stand back up halfway through dying.
+        ms_anim(ms.crawl ? 11 : 10); ms_snd_play(7);
+    }
+    if (ms.deathDone) return;
+    if (ms_step()) {
+        // hold the last frame (Joint_move wrapped to 0): step back onto it
+        ms.deathDone = 1;
+        ty_frame() = (unsigned char)(*(unsigned short*)(ENTITY->animBase + ty_anim() * 4) - 1);
+        ms_step();
+        ty_frame() = (unsigned char)(*(unsigned short*)(ENTITY->animBase + ty_anim() * 4) - 1);
+    }
+}
+
+} // namespace
+
+extern int battle_man_spider_active(void);   // BattleGame.cpp
+
+static bool manspider_update(void)
+{
+    {   // DIAG: why the gate fails
+        static int s_g = 0;
+        if (s_g < 6) {
+            extern bool g_bBattleManSpider; extern int g_battleActive, g_battleRoom;
+            extern void crashlog_mark(const char* step);
+            char m[160];
+            sprintf(m, "ms gate id%d cfg%d act%d room%d ok%d", (int)ENTITY->id, (int)g_bBattleManSpider,
+                    g_battleActive, g_battleRoom, battle_man_spider_active());
+            crashlog_mark(m);
+            s_g++;
+        }
+    }
+    if (!battle_man_spider_active()) return false;   // only tyrant entities reach here
+    {   // DIAG: Man Spider movement trace -> crash.log (first ~900 lines)
+        static int s_n = 0, s_px[8], s_pz[8]; static void* s_e[8];
+        int slot = 0;
+        while (slot < 7 && s_e[slot] && s_e[slot] != (void*)ENTITY) slot++;
+        s_e[slot] = (void*)ENTITY;
+        int x = ei(ENTITY, 0x34), z = ei(ENTITY, 0x3c);
+        int dx = x - s_px[slot], dz = z - s_pz[slot];
+        s_px[slot] = x; s_pz[slot] = z;
+        if (s_n < 900 && ((s_n & 3) == 0 || dx > 150 || dx < -150 || dz > 150 || dz < -150)) {
+            extern void crashlog_mark(const char* step);
+            char m[200];
+            sprintf(m, "ms v5 sf%02x hs%d hp%d id%d e%d st%d b%d s%d a%d f%d x%d z%d d%d,%d ang%d tx%d tz%d mx%d mz%d",
+                    (int)ENTITY->status_flags, (int)ENTITY->hit_state, (int)ENTITY->health,
+                    (int)ENTITY->id, slot, ENTITY->state, ms.beh, ms.sub, ty_anim(), ty_frame(), x, z, dx, dz,
+                    (int)(short)ENTITY->angle,
+                    ENTITY->jointsStructs ? ENTITY->jointsStructs[0].transform.t[0] : 0,
+                    ENTITY->jointsStructs ? ENTITY->jointsStructs[0].transform.t[2] : 0,
+                    ENTITY->scaMatrixData.localMatrix.t[0], ENTITY->scaMatrixData.localMatrix.t[2]);
+            crashlog_mark(m);
+        }
+        s_n++;
+    }
+    if ((g_message_flags & 4) != 0) {
+        switch (ENTITY->state) {
+        case 0: ms_init(); break;
+        case 1: ms_state1(); break;
+        case 2: ms_state_hit(); break;
+        case 3: ms_state_die(); break;
+        default: break;
+        }
+        if (ENTITY->state != 3) {
+            int ix = ei(ENTITY, 0x34) - ENTITY->speed.x, iz = ei(ENTITY, 0x3c) - ENTITY->speed.z;
+            // While he holds or throws the player the two overlap by design;
+            // the player-push would shove him backwards across the floor.
+            if (!(ms.beh == 5 && ms.sub >= 2) && ms.beh != 8) {
+                ResolveEntityScaCollision(reinterpret_cast<Entity*>(&g_playerEntity), ENTITY);
+                HandleEnemyPlayerCollisions();
+            }
+            check_room_collision(reinterpret_cast<VECTOR*>(&ei(ENTITY, 0x34)),
+                                 *(short*)((char*)(uintptr_t)ENTITY->Sca_info + 10));
+            if (ms.walking) {
+                int mx = ei(ENTITY, 0x34) - ix, mz = ei(ENTITY, 0x3c) - iz;
+                int want = ENTITY->speed.x * ENTITY->speed.x + ENTITY->speed.z * ENTITY->speed.z;
+                int got = mx * ENTITY->speed.x + mz * ENTITY->speed.z;   // progress along heading
+                if (got * 2 < want) { if (ms.stuck < 255) ms.stuck++; }
+                else if (ms.stuck) ms.stuck--;
+            } else ms.stuck = 0;
+            // Sliding along a wall still "moves", so also watch the real
+            // progress: walking for a second without closing 300 units on the
+            // player counts as blocked too (forces a detour in ms_turn).
+            {
+                static int s_chkT = 0, s_chkD = 0;
+                if (ms.walking && s_det.frames == 0) {
+                    int dnow = ms_dist();
+                    if (++s_chkT >= 30) {
+                        if (dnow > 1600 && dnow > s_chkD - 300) ms.stuck = 10;
+                        s_chkT = 0; s_chkD = dnow;
+                    }
+                } else { s_chkT = 0; s_chkD = ms_dist(); }
+            }
+            ms.walking = 0;
+        }
+    }
+    if ((g_message_flags & 4) != 0) ms_acid_boost();
+    ENTITY->has_enter_switch_zone = (unsigned char)is_entity_in_switch_zone(
+        reinterpret_cast<VECTOR*>(&ei(ENTITY, 0x34)), g_CurrentRdtDataTypePtr);
+    update_player_position(reinterpret_cast<PlayerEntity*>(ENTITY), 2);
+    return true;
+}
+
 void tyrant_update(void)
 {
+    if (manspider_update()) return;   // Mod: Battle Game Man Spider
     // Any live Tyrant whose behavior_flags carry 0x40 is handed to the SCD.
     if (ENTITY->state != 0 && (ENTITY->behavior_flags & 0x40) != 0)
         ENTITY->state = 8;
@@ -3281,10 +4201,52 @@ void player_tyrant_hit_02(void)
 
 } // namespace
 
+// Mod: the Man Spider's grab poses the player itself each frame (ms_player_pose),
+// so the player's own handler only has to keep the controls off.
+namespace { extern int g_msFling; }
+static void player_manspider_held(void)
+{
+    if (!g_msFling) return;                   // held: posed by the Man Spider
+    switch (g_playerEntity.action_state) {
+    case 0:
+        g_playerEntity.action_state = 1;
+        g_playerEntity.attackAnim = 2;            // Tyrant knock-down / get-up
+        g_playerEntity.animation_frame_id = 0;
+        g_playerEntity.unk_bf = 0;
+        g_playerEntity.unk_8c = 4;
+        g_playerEntity.move_speed_current = 650;
+        // fall through
+    case 1: {
+        g_playerEntity.action_state = (unsigned char)(g_playerEntity.action_state +
+            (char)Joint_move(0, g_playerEntity.emdScratchPtr1,
+                             g_playerEntity.emdScratchPtr2, 0x400));
+        short v = (short)(g_playerEntity.move_speed_current - 30);
+        g_playerEntity.move_speed_current = (unsigned short)(v < 0 ? 0 : v);
+        if (v > 0) {
+            int sx = g_playerEntity.scaMatrixData.localMatrix.t[0];
+            int sz = g_playerEntity.scaMatrixData.localMatrix.t[2];
+            Add_speedXZ(0x800);                   // backwards, away from him
+            check_room_collision((VECTOR*)g_playerEntity.scaMatrixData.localMatrix.t,
+                                 *(short*)((char*)(uintptr_t)g_playerEntity.Sca_info + 10));
+            (void)sx; (void)sz;
+        }
+        return;
+    }
+    default:
+        g_msFling = 0;
+        g_playerEntity.animationId = 1;
+        g_playerEntity.animFrameId = 0;
+        g_playerEntity.action_behavior = 0;
+        g_playerEntity.action_state = 0;
+        g_playerEntity.isBeingAttackedFlag = 0;
+        return;
+    }
+}
+
 // 0x004ba360 - four slots, the last NULL in the original.
 void* DAT_004ba360[4] = {
     /* 0  0x00424fc0 */ (void*)player_tyrant_hit_00,
     /* 1  0x00425140 */ (void*)player_tyrant_hit_01,
     /* 2  0x004252c0 */ (void*)player_tyrant_hit_02,
-    /* 3  -          */ nullptr
+    /* 3  mod        */ (void*)player_manspider_held   // Man Spider grab: posed by his AI
 };

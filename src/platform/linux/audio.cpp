@@ -484,3 +484,10 @@ long plat_audio_stream_pos(void)
     if (!s_streamOn) return -1;
     return s_streamPos;
 }
+
+// Port-added (title OPTIONS > SOUND OPTIONS): the MUSIC / EFFECTS volume is
+// implemented in the Windows backend (MarniSound.cpp). This backend keeps the
+// game linking and plays at full volume.
+void MarniSound_SetVolumes(int, int) {}
+void MarniSound_SetBankMusic(int, int) {}
+void MarniSound_SetVoiceVolume(int) {}

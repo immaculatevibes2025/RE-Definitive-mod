@@ -58,6 +58,11 @@ static void PlatLoadTestKeys(void)
 
 int plat_key_state(int vk)
 {
+    // Mod: an unbound key slot holds VK 0, and GetAsyncKeyState(0) is not
+    // defined - Windows can start reporting it as held and keep doing so
+    // until a reboot, which held every unbound slot's button down at once
+    // (the character select drifting, the inventory refusing to open).
+    if (vk <= 0 || vk > 0xFF) return 0;
     if (s_testKeyCount < 0) {
         s_testT0 = timeGetTime();
         PlatLoadTestKeys();
@@ -321,4 +326,95 @@ void plat_window_destroy(HWND window)
 void plat_cursor_show(BOOL show)
 {
     ShowCursor(show);
+}
+
+// ---------------------------------------------------------------------------
+// Display mode (port-added, the Video Options menu)
+//
+// The styles are CreateGameWindow's (main.cpp, 0x00441bd1/0x00441bda), so a
+// window switched here is the window the game would have created in that mode:
+//   windowed   WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, WS_EX_APPWINDOW
+//   fullscreen WS_POPUP | WS_CLIPCHILDREN,              WS_EX_TOPMOST
+// SetWindowPos delivers WM_SIZE synchronously, and the Marni WM_SIZE path
+// (MarniSystem.cpp VTable_HandleWindowMessage -> MarniDX::HandleWindowMessage)
+// resizes the swap chain to the new client area.
+// ---------------------------------------------------------------------------
+extern HWND g_hWnd;   // 0x00bcb2c0 (Globals.h)
+
+static const DWORD kWindowedStyle   = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+static const DWORD kWindowedExStyle = WS_EX_APPWINDOW;
+static const DWORD kFullStyle       = WS_POPUP | WS_CLIPCHILDREN;
+static const DWORD kFullExStyle     = WS_EX_TOPMOST;
+
+static BOOL plat_monitor_info(MONITORINFO* mi)
+{
+    mi->cbSize = sizeof(*mi);
+    HMONITOR mon = MonitorFromWindow(g_hWnd, MONITOR_DEFAULTTOPRIMARY);
+    return GetMonitorInfoA(mon, mi);
+}
+
+void plat_display_size(DWORD* outWidth, DWORD* outHeight)
+{
+    MONITORINFO mi;
+    DWORD w = 640, h = 480;
+    if (plat_monitor_info(&mi)) {
+        w = (DWORD)(mi.rcMonitor.right - mi.rcMonitor.left);
+        h = (DWORD)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+    }
+    if (outWidth)  *outWidth  = w;
+    if (outHeight) *outHeight = h;
+}
+
+void plat_display_work_size(DWORD* outWidth, DWORD* outHeight)
+{
+    MONITORINFO mi;
+    DWORD w = 640, h = 480;
+    if (plat_monitor_info(&mi)) {
+        // The work area less the windowed frame: the biggest client area.
+        RECT frame = { 0, 0, 0, 0 };
+        AdjustWindowRect(&frame, kWindowedStyle, FALSE);
+        LONG fw = frame.right - frame.left;
+        LONG fh = frame.bottom - frame.top;
+        LONG ww = (mi.rcWork.right - mi.rcWork.left) - fw;
+        LONG wh = (mi.rcWork.bottom - mi.rcWork.top) - fh;
+        if (ww > 0) w = (DWORD)ww;
+        if (wh > 0) h = (DWORD)wh;
+    }
+    if (outWidth)  *outWidth  = w;
+    if (outHeight) *outHeight = h;
+}
+
+void plat_apply_video_mode(DWORD width, DWORD height, BOOL fullScreen)
+{
+    if (g_hWnd == NULL) return;
+    MONITORINFO mi;
+    if (!plat_monitor_info(&mi)) return;
+
+    if (fullScreen) {
+        SetWindowLongA(g_hWnd, GWL_STYLE, (LONG)(kFullStyle | WS_VISIBLE));
+        SetWindowLongA(g_hWnd, GWL_EXSTYLE, (LONG)kFullExStyle);
+        SetWindowPos(g_hWnd, HWND_TOPMOST,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        return;
+    }
+
+    if (width < 320)  width = 320;
+    if (height < 240) height = 240;
+    RECT r = { 0, 0, (LONG)width, (LONG)height };
+    AdjustWindowRect(&r, kWindowedStyle, FALSE);
+    int winW = r.right - r.left;
+    int winH = r.bottom - r.top;
+    // Centre on the work area, as CreateGameWindow centres on the desktop.
+    int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - winW) / 2;
+    int y = mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - winH) / 2;
+    if (x < mi.rcWork.left) x = mi.rcWork.left;
+    if (y < mi.rcWork.top)  y = mi.rcWork.top;
+
+    SetWindowLongA(g_hWnd, GWL_STYLE, (LONG)(kWindowedStyle | WS_VISIBLE));
+    SetWindowLongA(g_hWnd, GWL_EXSTYLE, (LONG)kWindowedExStyle);
+    SetWindowPos(g_hWnd, HWND_NOTOPMOST, x, y, winW, winH,
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 }

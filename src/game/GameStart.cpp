@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include "../system/AssetPath.h"
+#include "BattleGame.h"       // battle_new_game_setup (Saturn Battle Game mod)
 
 extern void setSomeColor(int r, int g, int b);              // 0x00470a50
 extern void empty_40ae40(int);                              // 0x0040ae40 RoomInit.cpp
@@ -385,6 +386,47 @@ void dc_apply_item_tables(void)
 // inventory, character data, room SFX, character SFX, and initializes the
 // starting room.
 // ===========================================================================
+// ============================================================================
+// Mod (testing): [Testing] ArmorKey=1 in config.ini keeps the Armor Key in
+// the inventory - added to the first free slot when it is not carried.
+// Called at game start and on every room load (RoomInit.cpp), so it also
+// reaches games that were already running or loaded. Returns 1 if it added.
+// ============================================================================
+// Adds `item` to the first free slot unless already carried. 1 if it added.
+static int test_give_key_item(unsigned char item, const char* name)
+{
+    unsigned char* slots = (unsigned char*)g_ItemSlotsPointer;
+    const int n = (4 - ((g_playerEntity.id & 3) != 1)) * 2;   // 6 Chris, 8 Jill
+    int freeSlot = -1;
+    for (int i = 0; i < n; i++) {
+        if (slots[i * 2] == item) return 0;
+        if (slots[i * 2] == 0 && freeSlot < 0) freeSlot = i;
+    }
+    if (freeSlot < 0) {
+        dbg_printf("[testing] %s: inventory full\n", name);
+        return 0;
+    }
+    slots[freeSlot * 2]     = item;
+    slots[freeSlot * 2 + 1] = 1;
+    CountHeldItems();
+    dbg_printf("[testing] %s added to slot %d\n", name, freeSlot);
+    return 1;
+}
+
+// Also handles [Testing] ShieldKey=1 (the Shield Key, same rules).
+int test_give_armor_key(void)
+{
+    extern DWORD g_dwTestArmorKey, g_dwTestShieldKey;   // ConfigFile.cpp
+    if ((!g_dwTestArmorKey && !g_dwTestShieldKey) || g_ItemSlotsPointer == NULL ||
+        g_ItemSlotsPointer != (void*)g_ItemsSlots) {
+        return 0;   // not for Rebecca's inventory
+    }
+    int added = 0;
+    if (g_dwTestArmorKey)  added |= test_give_key_item(ITEM_ARMOR_KEY, "Armor Key");
+    if (g_dwTestShieldKey) added |= test_give_key_item(ITEM_SHIELD_KEY, "Shield Key");
+    return added;
+}
+
 void InitializeGame(void)
 {
     int has_alternate_outfit;
@@ -514,6 +556,35 @@ void InitializeGame(void)
         Flg_on((int)g_ScenarioFlags, SCENARIO_FLAG_SECOND_PLAYTHROUGH);
     }
 
+    // Mod: Saturn Battle Game - start room, item-box loadout, empty inventory.
+    // After the new-game player setup above, before the inventory images and
+    // the first room are built from it below. No-op outside the mode.
+    if ((g_main_state_flags & MSF_CONTINUE_GAME) == 0) {
+        battle_new_game_setup();
+
+        // Mod (testing): [Testing] StartCourtyard / StartBeforeYawn begin a
+        // new game somewhere else. Entry points are the destination records
+        // of the doors into those rooms (ROOM11B0 -> 3-00, ROOM20D0 -> 2-0E).
+        extern int g_testStartCourtyard, g_testStartBeforeYawn;   // ConfigFile.cpp
+        if (!g_battleActive && (g_main_state_flags2 & MSF2_ATTRACT_DEMO) == 0) {
+            if (g_testStartCourtyard) {
+                g_stageId = STAGE_COURTYARD;
+                g_roomId  = ROOM_COURTYARD_GARDEN;
+                g_playerEntity.position.x = 27300;
+                g_playerEntity.position.z = 5600;
+                g_playerEntity.directionAngle = 0;
+                dbg_printf("[testing] start: courtyard\n");
+            } else if (g_testStartBeforeYawn) {
+                g_stageId = STAGE_MANSION_2F;
+                g_roomId  = ROOM_FRONT_OF_ATTIC;
+                g_playerEntity.position.x = 2700;
+                g_playerEntity.position.z = 2900;
+                g_playerEntity.directionAngle = 0;
+                dbg_printf("[testing] start: in front of the attic (Yawn)\n");
+            }
+        }
+    }
+
     // Director's Cut item tables (lookup + combine); no-op for DcMode=0.
     dc_apply_item_tables();
 
@@ -531,6 +602,22 @@ void InitializeGame(void)
     DAT_00be41e1 = 0;
     g_defaultItemSlot = 0;
     DAT_00be9614 = 0;
+
+    // Mod (testing): for the [Testing] StartCourtyard / StartBeforeYawn
+    // starts, Jill's first two slots (knife, Beretta) become the shotgun and
+    // a stack of shells. Before LoadHeldItemsImages so the icons match.
+    {
+        extern int g_testStartCourtyard, g_testStartBeforeYawn;   // ConfigFile.cpp
+        if ((g_main_state_flags & MSF_CONTINUE_GAME) == 0 && !g_battleActive &&
+            (g_main_state_flags2 & MSF2_ATTRACT_DEMO) == 0 &&
+            (g_testStartCourtyard || g_testStartBeforeYawn) &&
+            (g_playerEntity.id & 3) != CHAR_CHRIS) {
+            g_ItemsSlots[0].Id  = ITEM_SHOTGUN;
+            g_ItemsSlots[0].qty = 7;     // loaded
+            g_ItemsSlots[1].Id  = ITEM_SHELLS;
+            g_ItemsSlots[1].qty = 30;
+        }
+    }
 
     LoadHeldItemsImages();
 
@@ -567,7 +654,20 @@ void InitializeGame(void)
 
     Task_sleep(1);
 
+    // Mod: a loaded save's outfit, before the player model is loaded below
+    // (SaveLoadScreen.cpp stores it; RoomInit.cpp has the same fallback).
+    {
+        extern int g_pendingCostumeOn;
+        if (g_pendingCostumeOn >= 0) {
+            if (g_pendingCostumeOn) g_main_state_flags2 |= MSF2_COSTUME_VARIANT;
+            else                    g_main_state_flags2 &= ~MSF2_COSTUME_VARIANT;
+            g_pendingCostumeOn = -1;
+        }
+    }
+
     SetupCharacterData();
+
+    test_give_armor_key();   // Mod (testing), see below
 
     g_loadDataDestPointer = g_shootDirEspBuffer;
     load_shoot_direction_data();
