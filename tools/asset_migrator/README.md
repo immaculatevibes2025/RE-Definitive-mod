@@ -14,7 +14,7 @@ It is a **tool**, not part of the game: `Game.vcxproj` and the root
 
 Migrates a USA or Japanese base tree.
 
-- **Source** is either an already-extracted folder or a disc image
+- **Resident Evil PC files** is either an already-extracted folder or a disc image
   (`.iso` / `.bin` / `.cue`). From an image the asset folders are read straight
   out of ISO9660; from a folder they are copied.
 - **Asset type** picks the destination tree, `<target>/USA` or `<target>/JPN`.
@@ -125,7 +125,7 @@ the coverage and background checks afterwards.
 
 Builds the Sega Saturn extras (Ticks, Zombie Wesker, the Saturn outfits, the Battle Game
 rooms and music, the Tick sounds, and the title-menu / Option Mode art) from the player's
-own *Resident Evil* Saturn disc image (`.cue`, `.bin` or `.iso`) into `<game folder>/USA`.
+own *Resident Evil* Saturn disc image (`.cue`, `.bin` or `.iso`) into `<output folder>/USA`.
 The tab runs `RE1 Saturn Extractor.exe` (built by `tools/saturn/build_exe.bat`), which must
 sit next to `re1_asset_migrator.exe` (or in a `saturn` folder beside it), and shows its log.
 

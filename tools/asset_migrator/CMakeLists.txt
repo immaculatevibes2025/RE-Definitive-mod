@@ -39,7 +39,12 @@ endif()
 file(GLOB RE1AM_GUI CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
 
-add_executable(re1_asset_migrator WIN32 ${RE1AM_GUI})
+# The game's icon: app.rc sets the .exe icon, resources.qrc the window icon.
+add_executable(re1_asset_migrator WIN32 ${RE1AM_GUI}
+               "${CMAKE_CURRENT_SOURCE_DIR}/resources.qrc")
+if(WIN32)
+    target_sources(re1_asset_migrator PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+endif()
 target_link_libraries(re1_asset_migrator PRIVATE Qt6::Widgets re1assets_core)
 set_target_properties(re1_asset_migrator PROPERTIES
     OUTPUT_NAME "re1_asset_migrator")

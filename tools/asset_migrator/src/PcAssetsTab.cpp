@@ -58,7 +58,8 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
     auto* browseSource = new QPushButton(tr("Browse..."), this);
 
     m_target = new QLineEdit(this);
-    m_target->setText(QCoreApplication::applicationDirPath());
+    m_target->setText(QCoreApplication::applicationDirPath() +
+                      QStringLiteral("/Resident Evil Definitive"));
     auto* browseTarget = new QPushButton(tr("Browse..."), this);
 
     m_version = new QComboBox(this);
@@ -117,7 +118,7 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
     m_ps1AudioBgm->setChecked(true);
     {
         auto* ps1Form = new QFormLayout(m_ps1);
-        ps1Form->addRow(tr("PS1 image:"), pathRow(m_ps1Image, browsePs1));
+        ps1Form->addRow(tr("PS1 disc:"), pathRow(m_ps1Image, browsePs1));
         ps1Form->addRow(QString(), m_ps1Credits);
         ps1Form->addRow(QString(), m_ps1Subs);
         ps1Form->addRow(QString(), m_ps1Movies);
@@ -153,8 +154,8 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
 
     auto* form = new QFormLayout();
     form->addRow(tr("Source type:"), m_sourceKind);
-    form->addRow(tr("Source:"), pathRow(m_source, browseSource));
-    form->addRow(tr("Target game folder:"), pathRow(m_target, browseTarget));
+    form->addRow(tr("Resident Evil PC files:"), pathRow(m_source, browseSource));
+    form->addRow(tr("Output folder:"), pathRow(m_target, browseTarget));
     form->addRow(tr("Asset type:"), m_version);
     form->addRow(QString(), m_convert);
     form->addRow(QString(), m_keepAvi);
@@ -265,7 +266,7 @@ void PcAssetsTab::onBrowsePs1() {
 
 void PcAssetsTab::onBrowseTarget() {
     const QString d = QFileDialog::getExistingDirectory(
-        this, tr("Select the game folder"), m_target->text());
+        this, tr("Select the output folder"), m_target->text());
     if (!d.isEmpty()) m_target->setText(d);
 }
 

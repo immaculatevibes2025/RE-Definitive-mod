@@ -34,7 +34,8 @@ DcAssetsTab::DcAssetsTab(QWidget* parent) : QWidget(parent) {
     auto* browseImage = new QPushButton(tr("Browse..."), this);
 
     m_target = new QLineEdit(this);
-    m_target->setText(QCoreApplication::applicationDirPath());
+    m_target->setText(QCoreApplication::applicationDirPath() +
+                      QStringLiteral("/Resident Evil Definitive"));
     auto* browseTarget = new QPushButton(tr("Browse..."), this);
 
     m_base = new QComboBox(this);
@@ -79,8 +80,8 @@ DcAssetsTab::DcAssetsTab(QWidget* parent) : QWidget(parent) {
     }
 
     auto* form = new QFormLayout();
-    form->addRow(tr("Disc image:"), pathRow(m_image, browseImage));
-    form->addRow(tr("Target game folder:"), pathRow(m_target, browseTarget));
+    form->addRow(tr("PS1 disc:"), pathRow(m_image, browseImage));
+    form->addRow(tr("Output folder:"), pathRow(m_target, browseTarget));
     form->addRow(tr("Base tree:"), m_base);
     form->addRow(QString(), m_convert);
     form->addRow(QString(), m_subs);
@@ -150,7 +151,7 @@ void DcAssetsTab::onBrowseImage() {
 
 void DcAssetsTab::onBrowseTarget() {
     const QString d = QFileDialog::getExistingDirectory(
-        this, tr("Select the game folder"), m_target->text());
+        this, tr("Select the output folder"), m_target->text());
     if (!d.isEmpty()) m_target->setText(d);
 }
 

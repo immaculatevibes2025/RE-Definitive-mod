@@ -7,12 +7,14 @@
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QIcon>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("RE1 Asset Migrator"));
     QApplication::setOrganizationName(QStringLiteral("RE1 Decomp"));
     QApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/residentevil.ico")));
 
     MainWindow window;
     window.show();

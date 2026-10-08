@@ -225,6 +225,16 @@ def gui():
 
     root = tk.Tk()
     root.title("RE1 Saturn Extractor")
+    # The game's icon: bundled next to the scripts in the .exe, or the
+    # repo copy when run from source.
+    for ico in (os.path.join(HERE, "residentevil.ico"),
+                os.path.join(HERE, "..", "..", "src", "platform", "win32", "residentevil.ico")):
+        if os.path.isfile(ico):
+            try:
+                root.iconbitmap(ico)
+            except tk.TclError:
+                pass
+            break
     root.resizable(False, False)
     disc, game = tk.StringVar(), tk.StringVar()
 

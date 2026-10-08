@@ -45,12 +45,13 @@ SaturnTab::SaturnTab(QWidget* parent) : QWidget(parent) {
     auto* browseImage = new QPushButton(tr("Browse..."), this);
 
     m_target = new QLineEdit(this);
-    m_target->setText(QCoreApplication::applicationDirPath());
+    m_target->setText(QCoreApplication::applicationDirPath() +
+                      QStringLiteral("/Resident Evil Definitive"));
     auto* browseTarget = new QPushButton(tr("Browse..."), this);
 
     auto* form = new QFormLayout();
-    form->addRow(tr("Saturn disc image:"), pathRow(m_image, browseImage));
-    form->addRow(tr("Resident Evil PC game folder:"), pathRow(m_target, browseTarget));
+    form->addRow(tr("Saturn disc:"), pathRow(m_image, browseImage));
+    form->addRow(tr("Output folder:"), pathRow(m_target, browseTarget));
 
     m_run = new RunPanel(this);
 
@@ -59,7 +60,7 @@ SaturnTab::SaturnTab(QWidget* parent) : QWidget(parent) {
            "disc image (.cue, .bin or .iso): the Ticks, Zombie Wesker, the "
            "Saturn outfits, the Battle Game rooms and music and the Tick "
            "sounds, plus the title-menu and Option Mode art made from the PC "
-           "files. Everything is written into <game folder>/USA.\n\n"
+           "files. Everything is written into <output folder>/USA.\n\n"
            "Run the PC Assets tab first. This tab uses \"%1\", which must be "
            "next to this program.").arg(QString::fromLatin1(kExtractorName)),
         this);
@@ -84,7 +85,7 @@ SaturnTab::SaturnTab(QWidget* parent) : QWidget(parent) {
                 return false;
             }
             if (image.isEmpty() || target.isEmpty()) {
-                error = QStringLiteral("Pick the Saturn disc image and the game folder first.");
+                error = QStringLiteral("Pick the Saturn disc and the output folder first.");
                 return false;
             }
             // The extractor runs its command-line mode with two arguments and
@@ -142,6 +143,6 @@ void SaturnTab::onBrowseImage() {
 
 void SaturnTab::onBrowseTarget() {
     const QString d = QFileDialog::getExistingDirectory(
-        this, tr("Select the Resident Evil PC game folder"), m_target->text());
+        this, tr("Select the output folder"), m_target->text());
     if (!d.isEmpty()) m_target->setText(d);
 }
