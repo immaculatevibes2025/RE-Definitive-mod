@@ -1,4 +1,5 @@
-# Resident Evil 1 for PC Decompilation
+# Resident Evil 1 - Definitive Mod
+
 
 > **About this fork**
 >
