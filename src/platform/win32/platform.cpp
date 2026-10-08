@@ -314,6 +314,11 @@ void plat_fatal(const char* message)
     ExitProcess(1);
 }
 
+void plat_exit(int code)
+{
+    ExitProcess((UINT)code);
+}
+
 // ---------------------------------------------------------------------------
 // Window / cursor lifecycle
 // ---------------------------------------------------------------------------

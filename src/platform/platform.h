@@ -118,6 +118,9 @@ void* plat_alloc_guarded_stacks(int count, size_t stackSize, size_t guardSize);
 // Report a fatal error to the user and terminate the process.
 void plat_fatal(const char* message);
 
+// Terminate the process at once with `code`, without a fatal-error report.
+void plat_exit(int code);
+
 // ---------------------------------------------------------------------------
 // Window / cursor lifecycle
 //

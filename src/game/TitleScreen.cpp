@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>          // memcpy, for the DC title sheet assembly
 #include "../system/AssetPath.h"
+#include "../platform/platform.h"
 #include "BattleGame.h"       // Saturn Battle Game mod: the third title option
 
 // Mod: Saturn Battle Game - see g_titleTextPosTableBattle below.
@@ -658,7 +659,7 @@ void update_title_options(void)
 			// process, no fade (quicker than Alt+F4's window teardown).
 			if (s_titleMenu && g_titleSelectionId == TITLE_ACTION_QUIT) {
 				CleanupVideoConfigAndSaveAllSettings();
-				ExitProcess(0);
+				plat_exit(0);
 			}
 			// Mod: no "Resident Evil" call for OPTIONS.
 			if (!(s_titleMenu && g_titleSelectionId == TITLE_ACTION_OPTIONS)) {
@@ -936,7 +937,7 @@ void title_state(void)
         if (g_titleSelectionId == TITLE_ACTION_QUIT) {
             // Mod: QUIT GAME - save the settings and close the window.
             CleanupVideoConfigAndSaveAllSettings();
-            DestroyWindow(g_hWnd);
+            plat_window_destroy(g_hWnd);
             for (;;) Task_sleep(1);
         }
     }
