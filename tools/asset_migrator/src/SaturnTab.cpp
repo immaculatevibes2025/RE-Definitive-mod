@@ -59,8 +59,7 @@ SaturnTab::SaturnTab(QWidget* parent) : QWidget(parent) {
         tr("Builds the Sega Saturn extras from your own Resident Evil (Saturn) "
            "disc image (.cue, .bin or .iso): the Ticks, Zombie Wesker, the "
            "Saturn outfits, the Battle Game rooms and music and the Tick "
-           "sounds, plus the title-menu and Option Mode art made from the PC "
-           "files. Everything is written into <output folder>/USA.\n\n"
+           "sounds. Everything is written into <output folder>/USA.\n\n"
            "Run the PC Assets tab first. This tab uses \"%1\", which must be "
            "next to this program.").arg(QString::fromLatin1(kExtractorName)),
         this);
