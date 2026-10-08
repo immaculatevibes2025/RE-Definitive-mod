@@ -19,3 +19,6 @@ re1.lock
 out/
 CMakeSettings.json
 tools/re15/*.asm
+tools/saturn/dist/
+tools/saturn/build/
+*.spec

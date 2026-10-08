@@ -1,4 +1,20 @@
-# Resident Evil (Saturn) model tools
+# Resident Evil (Saturn) tools
+
+## Saturn Extractor (start here)
+
+Double-click **`Saturn Extractor.bat`** (Windows; needs [Python 3](https://www.python.org/downloads/),
+the first run installs numpy and Pillow). Pick your *Resident Evil* Sega Saturn disc image
+(`.cue`, `.bin` or `.iso`) and your Resident Evil PC game folder, press **Extract**. It builds every Saturn file
+this build uses - Ticks, Zombie Wesker, the Saturn outfits, the Battle Game rooms and music, the
+Tick sounds - plus the title-menu and Option Mode art made from your PC files, and writes them
+into the game's `USA` folder. Command line: `python saturn_extractor.py <disc> <game folder>`.
+
+**Standalone .exe (no Python needed for players):** run `build_exe.bat` once on a PC with
+Python 3. It writes `dist\RE1 Saturn Extractor.exe`, a single file with the converters and
+libraries built in - ship that with a release.
+
+The individual converters it runs are described below.
+
 
 Python 3 tools for the Saturn release's `ENEMY/EM####.EMD` files.
 Needs: `numpy`, `Pillow` (only for `render.py`).
@@ -45,13 +61,15 @@ Tick's own six-state leap routine (`GAME2.PRG` 0x0606df24) and its variant-0 (pa
 
 ## Tick sounds
 
-    python3 ticksnd.py <Saturn SND/SE309A.CDP> <output folder>
+    python3 ticksnd.py <Saturn SND/SE309A.CDP> <output folder> <Saturn SND/SE309.CDP>
 
 Writes `TK_walkA/walkB/jump/att/land/smash/dam/Nout.wav` (16-bit mono, 22050 Hz) for
 `USA/SOUND`. With `[Mods] Ticks=1` the game loads them in place of the Hunter's `HU_*`
 (mansion) and `He_*` (underground) slots. `satsnd.py` reads the Saturn `.CDP` room banks
 (CD_PACK container, room slot table, tone bank, sequences). Slot 7 (`Nout`) is a
-zero-source voice on the Saturn, so `TK_Nout.wav` is silence.
+zero-source voice in SE309A, so `TK_Nout.wav` is silence; the other cave banks (SE308/309/30A/30B)
+put the Tick's roar in that slot, written as `TK_roar.wav` when SE309.CDP is given. `TK_cry.wav`
+(voice 0) is the scream as it kills.
 
 ## Where Ticks appear
 

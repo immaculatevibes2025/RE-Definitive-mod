@@ -1723,17 +1723,11 @@ void tick_cry_play(int which)
         path[sizeof(path) - 1] = '\0';
         if (findAndOpenFile(path) == 0) return;
         s_tickCry[which] = loadSndBankFromWav(path);
-        char m[96];
-        sprintf(m, "tick cry load: %s -> bank %d", path, s_tickCry[which]);
-        crashlog_mark(m);
         if (s_tickCry[which] == 0) return;
     }
     Calc3DSndPan((VECTOR*)ENTITY->scaMatrixData.localMatrix.t);
     pan_set(s_tickCry[which], (g_snd_pan_right - g_snd_pan_left) * 0x4E);
     SetSndSlot(s_tickCry[which], 0);
-    char m[96];
-    sprintf(m, "tick cry play %d: bank=%d", which, s_tickCry[which]);
-    crashlog_mark(m);
 }
 
 void Room_LoadEnemySoundBanks(void) {

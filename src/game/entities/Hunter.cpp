@@ -1411,24 +1411,6 @@ static void tick_arm_point_yaw(double yawDeg)
     j[9].flags |= 2;
 }
 
-// Diagnostics for the Tick grab (crash.log). Remove once it is settled.
-static void tick_log(const char* what)
-{
-    char m[256];
-    JointStruct* pj = g_playerEntity.jointsStructs;
-    int grp = (ENTITY->pad_160[1] & 0x70) >> 4;
-    sprintf(m, "tick %s: st=%d t=%d | pl anim=%d fr=%d beh=%d ast=%d hp=%d att=%d | head fl=%02X w=(%d,%d,%d) | pl t=(%d,%d,%d) | snd3=%d snd5=%d",
-            what, ENTITY->action_state, (int)H_TICKS,
-            g_playerEntity.animationId, g_playerEntity.animFrameId,
-            g_playerEntity.action_behavior, g_playerEntity.action_state,
-            g_playerEntity.health, g_playerEntity.isBeingAttackedFlag,
-            pj ? pj[1].flags : -1, pj ? pj[1].world.t[0] : 0, pj ? pj[1].world.t[1] : 0,
-            pj ? pj[1].world.t[2] : 0,
-            PLAYER_T_INT[0], PLAYER_T_INT[1], PLAYER_T_INT[2],
-            g_emSndBanks[(3 + grp * 10) * 2], g_emSndBanks[(5 + grp * 10) * 2]);
-    crashlog_mark(m);
-}
-
 extern void tick_cry_play(int roar);   // SoundSystem.cpp: 0 TK_att, 1 TK_smash
 
 static void tick_grab(void)
@@ -1482,7 +1464,6 @@ static void tick_grab(void)
                 ENTITY->action_state = 2;
                 H_TICKS = TICK_PULL_FRAMES;
                 tick_cry_play(0);   // the grab cry (Saturn: as it grabs)
-                tick_log("catch");
                 Snd_em(5);
                 return;
             }
@@ -1546,7 +1527,6 @@ static void tick_grab(void)
             s_head.active = false;
             if (a) a->ent = NULL;
             Snd_em(5);
-            tick_log("to hunter kill");
             H_BEH_WORD = 7;
             return;
             ENTITY->action_state = 3;
@@ -1591,7 +1571,6 @@ static void tick_grab(void)
                 g_playerEntity.action_state = 0;
                 Snd_em(5);
                 a->cryAt = t + 4;   // the cry, just after the slash sound
-                tick_log("slice");
                 s_head.active = false;
                 H_JOINT_SEL = TICK_GRAB_SEL;
             }
@@ -1599,14 +1578,11 @@ static void tick_grab(void)
             // First frame after the cut: the player's death sequence has
             // detached the head - throw it from where it is.
             tick_head_start();
-            tick_log("head start");
         }
         if (a && a->sliced) {
-            if (t == a->cryAt) { tick_cry_play(1); tick_log("cry"); }   // TK_att.wav
-            tick_log("after cut");
+            if (t == a->cryAt) tick_cry_play(1);   // TK_att.wav
         }
         if (t >= WIND + SWEEP + HOLD) {
-            tick_log("to roar");
             if (a) { a->k256 = 256; a->ent = NULL; }
             H_JOINT_SEL = 0;
             H_BEH_WORD = 9;   // the roar
@@ -2047,23 +2023,12 @@ static bool tick_burst_head_if_dead(void)
         s_head.active = true;
         tick_head_apply();
     }
-    tick_log("head burst");
     s_tickBurst = true;
     return true;
 }
 
 static void hunter_behavior_grabhold(void) // 0x00417ee0
 {
-    {
-        static int lastSt = -1;
-        if (mod_ticks_active() && ENTITY->action_state != lastSt) {
-            char m[80];
-            sprintf(m, "tick hold st=%d anim=%d ticks=%d", ENTITY->action_state,
-                    ENTITY->animationId, (int)H_TICKS);
-            crashlog_mark(m);
-            lastSt = ENTITY->action_state;
-        }
-    }
     switch (ENTITY->action_state) {
     case 0:
         ENTITY->action_state = 1;
@@ -2130,7 +2095,6 @@ static void hunter_behavior_grabhold(void) // 0x00417ee0
             tick_cry_play(3);   // the roar
             s_head.active = true;
             tick_head_apply();
-            tick_log("hold done -> roar");
             // Back to the AI layer (state 1) with behaviour 9, the howl. Just
             // the behaviour word left the hold's own state in place, which
             // has no slot 9 - the Tick froze.
