@@ -97,29 +97,9 @@ jobs:
           name: ${{ steps.stage.outputs.name }}
           path: ${{ steps.stage.outputs.zip }}
 
-      - name: Attach build to release
-        if: needs.release-please.outputs.release_created == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" "${{ steps.stage.outputs.zip }}" --clobber
-
-  # The asset migrator is a separate 64-bit Qt 6 tool; the game stays 32-bit
-  # MSVC. It ships as its own zip so the game package stays clean. The Qt
-  # runtime is deployed with windeployqt; ffmpeg is a runtime dependency for
-  # the movie conversions and is deliberately not bundled.
-  #
-  # Ninja, not a Visual Studio generator. A -G "Visual Studio NN YYYY" pin is
-  # wrong twice over: the image's Visual Studio major version moves (17 = VS
-  # 2022, 18 = VS 2026, and the project itself builds locally with VS 2026),
-  # and on top of that CMake resolves the instance through its own
-  # vswhere/COM probe, which is what failed here with "could not find any
-  # instance of Visual Studio". msvc-dev-cmd puts the installed toolset on
-  # PATH from the VS instance it finds, and Ninja needs no VS discovery at all,
-  # so the build survives either image change. Ninja is single-config, hence
-  # CMAKE_BUILD_TYPE and no per-config output subdirectory.
   build-asset-migrator:
-    needs: release-please
+    # Needs the Windows game build: its package ships inside this one.
+    needs: [release-please, build-windows]
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -170,12 +150,20 @@ jobs:
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon $ico --add-data "$ico;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image @data saturn_extractor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: residentevil-*-windows-x86
+          path: game-dl
+          merge-multiple: true
+
       - name: Deploy Qt runtime and stage release files
         id: stage
         run: |
           $version = "${{ needs.release-please.outputs.version }}"
           if (-not $version) { $version = $env:GITHUB_SHA.Substring(0,7) }
-          $name = "asset-migrator-$version-windows-x64"
+          # One Windows package: the migrator, with the game in the
+          # "Resident Evil Definitive" folder its tabs write into by default.
+          $name = "RE-Definitive-$version-windows"
           $out = "stage/$name"
           New-Item -ItemType Directory -Force $out | Out-Null
           # windeployqt assembles the runtime tree itself (the Qt DLLs, the
@@ -187,11 +175,13 @@ jobs:
           # an array and are splatted, one command on one line.
           $deployArgs = @(
             '--release', '--no-translations', '--no-system-d3d-compiler',
-            '--no-opengl-sw', '--dir', $out,
+            '--no-opengl-sw', '--dir', $out, '--plugindir', "$out/plugins",
             'tools/asset_migrator/build/re1_asset_migrator.exe'
           )
           windeployqt @deployArgs
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+          # The Qt plugin folders live under plugins/; qt.conf points Qt there.
+          Set-Content "$out/qt.conf" "[Paths]`r`nPlugins = plugins"
           # --dir deploys the libraries and plugins but not the binaries.
           Copy-Item "tools/asset_migrator/build/re1_asset_migrator.exe" $out
           # The headless core verifier the README documents.
@@ -199,6 +189,9 @@ jobs:
           Copy-Item "tools/asset_migrator/README.md" $out
           Copy-Item "tools/saturn/dist/RE1 Saturn Extractor.exe" $out
           Copy-Item "LICENSE" $out
+          $game = Get-ChildItem game-dl -Filter "residentevil-*-windows-x86.zip" | Select-Object -First 1
+          if (-not $game) { throw "Windows game package not found" }
+          Expand-Archive $game.FullName -DestinationPath "$out/Resident Evil Definitive"
           Compress-Archive -Path "$out/*" -DestinationPath "$name.zip"
           "zip=$name.zip" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
