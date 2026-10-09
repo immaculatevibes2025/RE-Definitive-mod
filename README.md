@@ -19,9 +19,9 @@ The goal is to create the most complete and feature-rich way to experience the o
 
 🆚 Before and After
 
-See how the original PC version compares to the Resident Evil: Definitive Mod
+Original vs Definitive Mod 
 
-Original                                                              -                                                              Definitive Mod 
+
 <img width="3788" height="1411" alt="OG vs DE Title Screen" src="https://github.com/user-attachments/assets/e6008f6e-ccfb-412e-8c49-3461cb4c1581" />
 <img width="3807" height="1433" alt="OG version Options menu" src="https://github.com/user-attachments/assets/07497b15-8159-49d8-b2fb-8bdff5ffa91b" />
 
