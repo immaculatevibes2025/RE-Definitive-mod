@@ -11,7 +11,7 @@ if not defined PY ( echo Python 3 is not installed. & pause & exit /b 1 )
 set DATA=
 for %%f in (battle2pc.py battle_title.py title_menu.py option_tabs.py satbgm.py satcostume.py tick2pc.py ticksnd.py) do call set DATA=%%DATA%% --add-data "%%f;."
 set ICO=%~dp0..\..\src\platform\win32esidentevil.ico
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon "%ICO%" --add-data "%ICO%;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image %DATA% saturn_extractor.py || ( pause & exit /b 1 )
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon "%ICO%" --add-data "%ICO%;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image --hidden-import wave --hidden-import fractions %DATA% saturn_extractor.py || ( pause & exit /b 1 )
 rmdir /s /q build 2>nul
 del "RE1 Saturn Extractor.spec" 2>nul
 echo.

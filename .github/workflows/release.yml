@@ -149,7 +149,7 @@ jobs:
           $data = @()
           foreach ($f in 'battle2pc.py','battle_title.py','title_menu.py','option_tabs.py','satbgm.py','satcostume.py','tick2pc.py','ticksnd.py') { $data += @('--add-data', "$f;.") }
           $ico = "$env:GITHUB_WORKSPACE/src/platform/win32/residentevil.ico"
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon $ico --add-data "$ico;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image @data saturn_extractor.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon $ico --add-data "$ico;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image --hidden-import wave --hidden-import fractions @data saturn_extractor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
       - name: Deploy Qt runtime and stage the migrator
