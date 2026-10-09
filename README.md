@@ -51,9 +51,9 @@ Saturn-Exclusive Costumes — Additional costumes originally exclusive to the Se
 
 ⚙️ Modern Quality-of-Life Improvements
 
-Director's Cut Support — This mod supports the Director's Cut version of Resident Evil with the Sega Saturn content included.
+- Director's Cut Support — This mod supports the Director's Cut version of Resident Evil with the Sega Saturn content included.
 
-Overhauled Options Menu — A completely updated in-game options menu with video, sound, control and gameplay settings.
+- Overhauled Options Menu — A completely updated in-game options menu with video, sound, control and gameplay settings.
 
 CRT Shader — A classic CRT-style presentation directly through the in-game options.
 
