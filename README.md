@@ -17,6 +17,22 @@ Resident Evil: Definitive Mod aims to bring together the exclusive content, feat
 
 The goal is to create the most complete and feature-rich way to experience the original Resident Evil without losing the classic charm of the original game.
 
+🆚 Before and After
+
+See how the original PC version compares to the Resident Evil: Definitive Mod
+<img width="1902" height="1440" alt="OG version Title Screen" src="https://github.com/user-attachments/assets/04c10592-b7ce-4991-9bb0-07c5e1da64d0" /> <img width="1920" height="1440" alt="DE version Title Screen 1" src="https://github.com/user-attachments/assets/2066cf76-af1a-4d66-85e2-10f8882df342" />
+
+
+
+
+
+
+
+
+
+
+
+
 ✨ Features
 
 The mod combines content from different releases of Resident Evil and adds several improvements designed to make the PC version more convenient and enjoyable to play.
