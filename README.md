@@ -118,7 +118,7 @@ Saturn-Exclusive Costumes — The Saturn-exclusive costumes may exhibit minor gr
 
 Battle Game Ending Sequence — The ending shot, music, and rank screen are not a 1:1 recreation of the Sega Saturn version.
 
-Ticks — The Tick may exhibit slightly different behavior compared to its implementation in the original Sega Saturn version. Most notably his decapitation animation is different. 
+Ticks — The Tick may exhibit slightly different behavior compared to its implementation in the original Sega Saturn version. Most notably the decapitation animation is different. 
 
 60 FPS — The interpolated 60 FPS mode may introduce some unintended visual or gameplay bugs.
 
