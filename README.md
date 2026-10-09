@@ -19,20 +19,17 @@ The goal is to create the most complete and feature-rich way to experience the o
 
 🆚 Before and After
 
-Original vs Definitive Mod 
+Original vs Definitive Mod:
 
 
 <img width="3788" height="1411" alt="OG vs DE Title Screen" src="https://github.com/user-attachments/assets/e6008f6e-ccfb-412e-8c49-3461cb4c1581" />
 <img width="3807" height="1433" alt="OG version Options menu" src="https://github.com/user-attachments/assets/07497b15-8159-49d8-b2fb-8bdff5ffa91b" />
 
+Definitive Mod Exclusives, CRT Filter, Widescreen and Battle Game:
 
-
-
-
-
-
-
-
+<img width="1896" height="1440" alt="CRT Filter On" src="https://github.com/user-attachments/assets/36e52768-68b1-4d6d-a75e-446f4c238a72" />
+<img width="2556" height="1440" alt="Widescreen (crop)" src="https://github.com/user-attachments/assets/a273b170-b26a-40cb-9149-08996ba945cc" />
+<img width="2538" height="1440" alt="Battle Game" src="https://github.com/user-attachments/assets/b7580823-6678-48d3-a44f-d1f39a98693e" />
 
 
 
