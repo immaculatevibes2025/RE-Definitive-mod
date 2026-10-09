@@ -74,9 +74,10 @@ A legitimate PC copy of Resident Evil (Steam, GOG etc) to extract the PC assets 
 
 1. Download the latest build
 
-2. Extract the Assets using the "RE Asset Migrator.exe" 
+2. Extract the Assets using the "RE Asset Migrator.exe"
+Note: FFmpeg is not included. Download it separately if you want to convert PS1 video files or extract the Director's cut. Place it in the folder alongside the RE Asset Migrator.exe.
 
-3. Play
+4. Play
 
 Important: This project does not provide copyrighted game data or game assets. You must supply your own copies of the PC, Sega Saturn and PlayStation versions of Resident Evil.
 
