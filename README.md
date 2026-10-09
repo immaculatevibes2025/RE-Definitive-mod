@@ -43,11 +43,11 @@ The mod combines content from different releases of Resident Evil and adds sever
 
 🕹️ Version-Exclusive Content
 
-Battle Game — An exclusive game mode originally found in the Sega Saturn version of Resident Evil.
+- Battle Game — An exclusive game mode originally found in the Sega Saturn version of Resident Evil.
 
-Ticks — An exclusive enemy originally found in the Sega Saturn version.
+- Ticks — An exclusive enemy originally found in the Sega Saturn version.
 
-Saturn-Exclusive Costumes — Additional costumes originally exclusive to the Sega Saturn version of Resident Evil.
+- Saturn-Exclusive Costumes — Additional costumes originally exclusive to the Sega Saturn version of Resident Evil.
 
 ⚙️ Modern Quality-of-Life Improvements
 
@@ -55,40 +55,40 @@ Saturn-Exclusive Costumes — Additional costumes originally exclusive to the Se
 
 - Overhauled Options Menu — A completely updated in-game options menu with video, sound, control and gameplay settings.
 
-CRT Shader — A classic CRT-style presentation directly through the in-game options.
+- CRT Shader — A classic CRT-style presentation directly through the in-game options.
 
-Anti-Aliasing — Smooth jagged edges with SMAA anti-aliasing, switched on or off in the in-game video options.
+- Anti-Aliasing — Smooth jagged edges with SMAA anti-aliasing, switched on or off in the in-game video options.
 
-(Optional) Widescreen (Crop) — Play the game in a cropped widescreen to not stretch the original 4:3 backgrounds. By default the game preserves the original 4:3 aspect ratio.
+- (Optional) Widescreen (Crop) — Play the game in a cropped widescreen to not stretch the original 4:3 backgrounds. By default the game preserves the original 4:3 aspect ratio.
 
-60 FPS — An interpolated 60 FPS option that preserves the original 30 FPS game logic while providing smoother visual motion.
+- 60 FPS — An interpolated 60 FPS option that preserves the original 30 FPS game logic while providing smoother visual motion.
 
-Modernized Controls — The default keyboard/mouse and gamepad controls have been adjusted to feel more accessible.
+- Modernized Controls — The default keyboard/mouse and gamepad controls have been adjusted to feel more accessible.
 
-(Optional) Knife Button — A dedicated knife button based on the controls introduced in the Nintendo DS version, Resident Evil: Deadly Silence.
+- (Optional) Knife Button — A dedicated knife button based on the controls introduced in the Nintendo DS version, Resident Evil: Deadly Silence.
 
-(Optional) Quick Turn — A dedicated quick-turn button, also based on Deadly Silence.
+- (Optional) Quick Turn — A dedicated quick-turn button, also based on Deadly Silence.
 
-(Optional) Reload Button — A dedicated reload button, also based on the Nintendo DS version.
+- (Optional) Reload Button — A dedicated reload button, also based on the Nintendo DS version.
 
-Mouse Button Support — Mouse buttons can now be assigned and used as in-game controls.
+- Mouse Button Support — Mouse buttons can now be assigned and used as in-game controls.
 
-Expanded Keyboard Support — Additional keyboard keys, including Shift and Tab, can now be used for in-game controls.
+- Expanded Keyboard Support — Additional keyboard keys, including Shift and Tab, can now be used for in-game controls.
 
-Optional Gameplay Changes: The new gameplay features are completely optional. They can be disabled if you want to preserve the original gameplay experience of the 1996 release. The goal is to simply provide modern conveniences. 
+- Optional Gameplay Changes: The new gameplay features are completely optional. They can be disabled if you want to preserve the original gameplay experience of the 1996 release. The goal is to simply provide modern conveniences. 
 They are disabled by default. 
 
 The aim is to make these features available directly within the game, eliminating the need for a separate configuration program or manual editing of config.ini.
 
 📦 Requirements
 
-Only **Windows** (For now)
+- Only **Windows** (For now)
 
-A legitimate PC copy of Resident Evil (Steam, GOG etc) to extract the PC assets from. 
+- A legitimate PC copy of Resident Evil (Steam, GOG etc) to extract the PC assets from. 
 
-(Optional) A legitimate Sega Saturn copy of Resident Evil to extract the Saturn assets.
+- (Optional) A legitimate Sega Saturn copy of Resident Evil to extract the Saturn assets.
 
-(Optional) A legitimate PlayStation copy of Resident Evil: Director's Cut.
+- (Optional) A legitimate PlayStation copy of Resident Evil: Director's Cut.
 
 🔧 How to Install
 
