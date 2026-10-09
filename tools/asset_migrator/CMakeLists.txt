@@ -47,7 +47,7 @@ if(WIN32)
 endif()
 target_link_libraries(re1_asset_migrator PRIVATE Qt6::Widgets re1assets_core)
 set_target_properties(re1_asset_migrator PROPERTIES
-    OUTPUT_NAME "re1_asset_migrator")
+    OUTPUT_NAME "RE 1 Asset Migrator")
 if(MSVC)
     target_compile_options(re1_asset_migrator PRIVATE /W3 /utf-8)
 endif()

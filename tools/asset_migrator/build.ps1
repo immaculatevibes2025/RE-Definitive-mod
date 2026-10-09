@@ -80,7 +80,7 @@ if ($LASTEXITCODE -ne 0) { throw "build failed" }
 # per-config subdirectory; single-config generators (Ninja) write them beside
 # the build system, and $Config reached them as CMAKE_BUILD_TYPE.
 $out = if ($gen -like "Visual Studio*") { Join-Path $build $Config } else { $build }
-$exe = Join-Path $out "re1_asset_migrator.exe"
+$exe = Join-Path $out "RE 1 Asset Migrator.exe"
 if (-not (Test-Path $exe)) { throw "no exe at $exe" }
 Write-Host "built : $exe"
 
