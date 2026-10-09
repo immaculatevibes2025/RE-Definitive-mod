@@ -82,7 +82,7 @@ The aim is to make these features available directly within the game, eliminatin
 
 📦 Requirements
 
-- Only **Windows** (For now)
+- Only supports **Windows** (For now) 
 
 - A legitimate PC copy of Resident Evil (Steam, GOG etc) to extract the PC assets from. 
 
