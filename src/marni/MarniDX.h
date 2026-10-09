@@ -151,12 +151,12 @@ public:
     float WideVisibleLines() const;
     int  GetAspectMode() const;
 
-    // Port-added (Video Options menu): multisample anti-aliasing (1 = off,
-    // 2, 4 or 8 samples; the device may grant fewer - GetMsaa reports what is
-    // in use) and the CRT shader. Either one makes the game draw into an
-    // offscreen scene that Present() puts on the back buffer.
-    void SetMsaa(int samples);
-    int  GetMsaa() const;
+    // Port-added (Video Options menu): SMAA anti-aliasing (GetSmaa reports
+    // whether it is actually running) and the CRT shader. Either one makes
+    // the game draw into an offscreen scene that Present() puts on the back
+    // buffer.
+    void SetSmaa(BOOL on);
+    BOOL GetSmaa() const;
     void SetCrtShader(BOOL on);
     BOOL GetCrtShader() const;
 

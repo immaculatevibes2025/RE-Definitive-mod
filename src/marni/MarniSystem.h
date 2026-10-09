@@ -161,9 +161,9 @@ void  MarniGetRenderScale(float* outScaleX, float* outScaleY);
 // the WM_SIZE path does. g_dwAspectMode is the caller's to persist.
 void  MarniSetAspectMode(int mode);
 
-// Port-added (Video Options menu): MSAA sample count (1/2/4/8) and the CRT
-// shader on the running renderer. g_dwMsaa / g_bCrtShader are the caller's.
-void  MarniSetMsaa(int samples);
+// Port-added (Video Options menu): SMAA anti-aliasing and the CRT shader on
+// the running renderer. g_bSmaa / g_bCrtShader are the caller's.
+void  MarniSetSmaa(BOOL on);
 void  MarniSetCrtShader(BOOL on);
 
 // Create a texture from raw host pixels; returns an opaque MarniHandle.

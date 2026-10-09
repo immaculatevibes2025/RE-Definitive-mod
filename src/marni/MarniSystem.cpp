@@ -133,7 +133,7 @@ static CMarniDirect3D* MarniDirect3D_Construct(CMarniDirect3D* pThis,
         // Port-added: config.ini [Display] Aspect, set before Create so the
         // first frame is already laid out (Create reports the content size).
         pThis->m_pDX->SetAspectMode((int)g_dwAspectMode);
-        pThis->m_pDX->SetMsaa((int)g_dwMsaa);
+        pThis->m_pDX->SetSmaa(g_bSmaa);
         pThis->m_pDX->SetCrtShader(g_bCrtShader);
         if (pThis->m_pDX->Create(hWnd, (int)pThis->m_width,
                                  (int)pThis->m_height,
@@ -853,11 +853,11 @@ BOOL MarniCreateTexture(int width, int height, int bpp, const void* pixelData,
 }
 
 // Port-added (Video Options menu).
-void MarniSetMsaa(int samples)
+void MarniSetSmaa(BOOL on)
 {
     CMarniDirect3D* pD3D = (CMarniDirect3D*)g_pMarniDirect3D;
     if (!pD3D || !pD3D->m_pDX) return;
-    pD3D->m_pDX->SetMsaa(samples);
+    pD3D->m_pDX->SetSmaa(on);
 }
 
 void MarniSetCrtShader(BOOL on)

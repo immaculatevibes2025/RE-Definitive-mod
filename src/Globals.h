@@ -72,7 +72,7 @@ extern DWORD         g_dwScreenWidth;                  // 0x007d9150
 extern DWORD         g_dwScreenHeight;                 // 0x007d9154
 extern BOOL          g_bFullScreen;
 extern DWORD         g_dwAspectMode;                   // config.ini [Display] Aspect (MARNI_ASPECT_*), port-added
-extern DWORD         g_dwMsaa;                         // config.ini [Display] MSAA (1/2/4/8), port-added
+extern BOOL          g_bSmaa;                          // config.ini [Display] SMAA (0/1), port-added
 extern BOOL          g_bCrtShader;                     // config.ini [Display] CRT, port-added
 extern BOOL          g_bVSync;                         // config.ini [Display] VSync                    // 0x007d9158
 extern int           g_dwBitDepth;                     // 0x004d642c

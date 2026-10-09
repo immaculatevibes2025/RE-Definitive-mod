@@ -19,7 +19,13 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <string>
 #include "../game/Types.h"
+// SMAA (Jorge Jimenez et al., MIT license - see smaa/LICENSE.txt): the shader
+// source and its two precomputed lookup textures.
+#include "smaa/SmaaHlsl.h"
+#include "smaa/AreaTex.h"
+#include "smaa/SearchTex.h"
 
 // config.ini [Display] VSync (Globals.cpp). Declared locally rather than
 // pulling all of Globals.h into the Marni layer.
@@ -94,9 +100,10 @@ float4 main(PS_INPUT i) : SV_Target { return g_Texture.Sample(g_Sampler, i.tex) 
 
 // ============================================================================
 // Port-added post-processing (Video Options: ANTI-ALIASING / CRT SHADER).
-// With either on, the game draws into an offscreen scene target (multisampled
-// for MSAA) and Present() puts it on the back buffer through one full-screen
-// pass: a straight copy, or the CRT shader below.
+// With either on, the game draws into an offscreen scene target and Present()
+// puts it on the back buffer: SMAA's three passes when anti-aliasing is on,
+// then (with the CRT shader, or without SMAA) one full-screen pass - a
+// straight copy, or the CRT shader below.
 // ============================================================================
 static const char* g_PostVS_Source = R"(
 float4 main(uint id : SV_VertexID) : SV_Position
@@ -213,6 +220,89 @@ float4 main(float4 pos : SV_Position) : SV_Target
 }
 )";
 
+// SMAA 1x around SMAA.hlsl (smaa/SmaaHlsl.h): CompilePostShaders builds the
+// source as prefix + SMAA.hlsl + suffix and compiles one entry point per pass.
+static const char* g_SmaaPrefix_Source = R"SMAA(
+// SMAA 1x (High preset) for the post pass. SMAA.hlsl is compiled with
+// SMAA_CUSTOM_SL so its samplers sit at fixed registers (s0 linear, s1 point)
+// instead of the effect-framework sampler blocks of SMAA_HLSL_4.
+#define SMAA_CUSTOM_SL 1
+#define SMAA_PRESET_HIGH 1
+cbuffer SmaaCB : register(b0) { float4 g_SmaaMetrics; };
+#define SMAA_RT_METRICS g_SmaaMetrics
+SamplerState SmaaLinear : register(s0);
+SamplerState SmaaPoint  : register(s1);
+#define SMAATexture2D(tex) Texture2D tex
+#define SMAATexturePass2D(tex) tex
+#define SMAASampleLevelZero(tex, coord) tex.SampleLevel(SmaaLinear, coord, 0)
+#define SMAASampleLevelZeroPoint(tex, coord) tex.SampleLevel(SmaaPoint, coord, 0)
+#define SMAASampleLevelZeroOffset(tex, coord, offset) tex.SampleLevel(SmaaLinear, coord, 0, offset)
+#define SMAASample(tex, coord) tex.Sample(SmaaLinear, coord)
+#define SMAASamplePoint(tex, coord) tex.Sample(SmaaPoint, coord)
+#define SMAASampleOffset(tex, coord, offset) tex.Sample(SmaaLinear, coord, offset)
+#define SMAA_FLATTEN [flatten]
+#define SMAA_BRANCH [branch]
+)SMAA";
+
+static const char* g_SmaaSuffix_Source = R"SMAA(
+// Full-screen triangle; uv (0,0) is the top-left of the scene.
+void SmaaTri(uint id, out float4 pos, out float2 uv)
+{
+    uv  = float2((id << 1) & 2, id & 2);
+    pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+
+// Pass 1: luma edges of the scene (t0) into an RG8 target.
+Texture2D g_SmaaColor  : register(t0);
+void SmaaEdgeVS(uint id : SV_VertexID, out float4 pos : SV_Position,
+                out float2 uv : TEXCOORD0, out float4 off[3] : TEXCOORD1)
+{
+    SmaaTri(id, pos, uv);
+    SMAAEdgeDetectionVS(uv, off);
+}
+float4 SmaaEdgePS(float4 pos : SV_Position, float2 uv : TEXCOORD0,
+                  float4 off[3] : TEXCOORD1) : SV_Target
+{
+    return float4(SMAALumaEdgeDetectionPS(uv, off, g_SmaaColor), 0.0, 0.0);
+}
+
+// Pass 2: blending weights from the edges (t1) and the lookup textures.
+Texture2D g_SmaaEdges  : register(t1);
+Texture2D g_SmaaArea   : register(t2);
+Texture2D g_SmaaSearch : register(t3);
+void SmaaWeightVS(uint id : SV_VertexID, out float4 pos : SV_Position,
+                  out float2 uv : TEXCOORD0, out float2 pix : TEXCOORD1,
+                  out float4 off[3] : TEXCOORD2)
+{
+    SmaaTri(id, pos, uv);
+    SMAABlendingWeightCalculationVS(uv, pix, off);
+}
+float4 SmaaWeightPS(float4 pos : SV_Position, float2 uv : TEXCOORD0,
+                    float2 pix : TEXCOORD1, float4 off[3] : TEXCOORD2) : SV_Target
+{
+    return SMAABlendingWeightCalculationPS(uv, pix, off, g_SmaaEdges,
+                                           g_SmaaArea, g_SmaaSearch, 0.0);
+}
+
+// Pass 3: blend the scene (t0) with its neighbours by the weights (t4).
+Texture2D g_SmaaBlend  : register(t4);
+void SmaaBlendVS(uint id : SV_VertexID, out float4 pos : SV_Position,
+                 out float2 uv : TEXCOORD0, out float4 off : TEXCOORD1)
+{
+    SmaaTri(id, pos, uv);
+    SMAANeighborhoodBlendingVS(uv, off);
+}
+float4 SmaaBlendPS(float4 pos : SV_Position, float2 uv : TEXCOORD0,
+                   float4 off : TEXCOORD1) : SV_Target
+{
+    return float4(SMAANeighborhoodBlendingPS(uv, off, g_SmaaColor, g_SmaaBlend).rgb, 1.0);
+}
+)SMAA";
+
+struct SmaaConstantBuffer {
+    float metrics[4];   // 1/width, 1/height, width, height
+};
+
 struct CrtConstantBuffer {
     float rect[4];
     float size[4];
@@ -272,27 +362,53 @@ struct MarniDX::Impl {
     ID3D11RenderTargetView*  curRtv        = nullptr;
     ID3D11DepthStencilView*  curDsv        = nullptr;
 
-    // Port-added offscreen scene (MSAA and/or CRT shader). Back-buffer sized.
-    int                      msaa          = 1;     // requested 1/2/4/8
-    int                      msaaActive    = 1;     // what the device allowed
+    // Port-added offscreen scene (SMAA and/or CRT shader). Back-buffer sized.
+    BOOL                     smaa          = FALSE; // requested
+    BOOL                     smaaActive    = FALSE; // the SMAA targets exist
     BOOL                     crtShader     = FALSE;
-    ID3D11Texture2D*         sceneTex      = nullptr;   // msaaActive samples
+    ID3D11Texture2D*         sceneTex      = nullptr;
     ID3D11RenderTargetView*  sceneRtv      = nullptr;
-    ID3D11ShaderResourceView* sceneSrv     = nullptr;   // only when msaaActive == 1
+    ID3D11ShaderResourceView* sceneSrv     = nullptr;
     ID3D11Texture2D*         sceneDepth    = nullptr;
     ID3D11DepthStencilView*  sceneDsv      = nullptr;
-    ID3D11Texture2D*         resolveTex    = nullptr;   // only when msaaActive > 1
-    ID3D11ShaderResourceView* resolveSrv   = nullptr;
     ID3D11VertexShader*      postVS        = nullptr;
     ID3D11PixelShader*       copyPS        = nullptr;
     ID3D11PixelShader*       crtPS         = nullptr;
     ID3D11Buffer*            crtCB         = nullptr;
     ID3D11RasterizerState*   rasterNoScissor = nullptr;
 
-    BOOL UsesScene() const { return msaa > 1 || crtShader; }
+    // SMAA: per-scene targets (edges RG8, blend weights RGBA8, and the
+    // anti-aliased frame when the CRT shader still has to run on it), the
+    // device-lifetime lookup textures, and the three passes' shaders.
+    ID3D11Texture2D*         smaaEdgesTex  = nullptr;
+    ID3D11RenderTargetView*  smaaEdgesRtv  = nullptr;
+    ID3D11ShaderResourceView* smaaEdgesSrv = nullptr;
+    ID3D11Texture2D*         smaaBlendTex  = nullptr;
+    ID3D11RenderTargetView*  smaaBlendRtv  = nullptr;
+    ID3D11ShaderResourceView* smaaBlendSrv = nullptr;
+    ID3D11Texture2D*         smaaOutTex    = nullptr;   // only with the CRT shader
+    ID3D11RenderTargetView*  smaaOutRtv    = nullptr;
+    ID3D11ShaderResourceView* smaaOutSrv   = nullptr;
+    ID3D11Texture2D*         smaaAreaTex   = nullptr;
+    ID3D11ShaderResourceView* smaaAreaSrv  = nullptr;
+    ID3D11Texture2D*         smaaSearchTex = nullptr;
+    ID3D11ShaderResourceView* smaaSearchSrv = nullptr;
+    ID3D11VertexShader*      smaaEdgeVS    = nullptr;
+    ID3D11PixelShader*       smaaEdgePS    = nullptr;
+    ID3D11VertexShader*      smaaWeightVS  = nullptr;
+    ID3D11PixelShader*       smaaWeightPS  = nullptr;
+    ID3D11VertexShader*      smaaBlendVS   = nullptr;
+    ID3D11PixelShader*       smaaBlendPS   = nullptr;
+    ID3D11Buffer*            smaaCB        = nullptr;
 
-    // Set by SetMsaa / SetCrtShader; the scene is rebuilt at the end of the
-    // next Present(). See SetMsaa for why it is never rebuilt on the spot.
+    BOOL UsesScene() const { return smaa || crtShader; }
+    BOOL SmaaReady() const {
+        return smaaEdgeVS && smaaEdgePS && smaaWeightVS && smaaWeightPS &&
+               smaaBlendVS && smaaBlendPS && smaaCB && smaaAreaSrv && smaaSearchSrv;
+    }
+
+    // Set by SetSmaa / SetCrtShader; the scene is rebuilt at the end of the
+    // next Present(). See SetSmaa for why it is never rebuilt on the spot.
     BOOL                     sceneDirty    = FALSE;
 
     // pipeline state
@@ -412,7 +528,7 @@ struct MarniDX::Impl {
 
     // Port-added offscreen scene management.
     void ReleaseScene();
-    void CreateScene();          // (re)build for bbW x bbH, msaa, crtShader
+    void CreateScene();          // (re)build for bbW x bbH, smaa, crtShader
     void BindCurrent();          // OMSetRenderTargets on the current target
     ID3D11Texture2D* ResolvedScene();   // single-sample copy of the scene, or null
 };
@@ -665,6 +781,17 @@ void MarniDX::Impl::ReleaseAllState()
     if (copyPS)          { copyPS->Release();          copyPS          = nullptr; }
     if (crtPS)           { crtPS->Release();           crtPS           = nullptr; }
     if (crtCB)           { crtCB->Release();           crtCB           = nullptr; }
+    if (smaaEdgeVS)      { smaaEdgeVS->Release();      smaaEdgeVS      = nullptr; }
+    if (smaaEdgePS)      { smaaEdgePS->Release();      smaaEdgePS      = nullptr; }
+    if (smaaWeightVS)    { smaaWeightVS->Release();    smaaWeightVS    = nullptr; }
+    if (smaaWeightPS)    { smaaWeightPS->Release();    smaaWeightPS    = nullptr; }
+    if (smaaBlendVS)     { smaaBlendVS->Release();     smaaBlendVS     = nullptr; }
+    if (smaaBlendPS)     { smaaBlendPS->Release();     smaaBlendPS     = nullptr; }
+    if (smaaCB)          { smaaCB->Release();          smaaCB          = nullptr; }
+    if (smaaAreaSrv)     { smaaAreaSrv->Release();     smaaAreaSrv     = nullptr; }
+    if (smaaAreaTex)     { smaaAreaTex->Release();     smaaAreaTex     = nullptr; }
+    if (smaaSearchSrv)   { smaaSearchSrv->Release();   smaaSearchSrv   = nullptr; }
+    if (smaaSearchTex)   { smaaSearchTex->Release();   smaaSearchTex   = nullptr; }
     if (rasterNoScissor) { rasterNoScissor->Release(); rasterNoScissor = nullptr; }
     curRtv = nullptr; curDsv = nullptr;
     if (depthStencilView){ depthStencilView->Release(); depthStencilView = nullptr; }
@@ -676,13 +803,13 @@ void MarniDX::Impl::ReleaseAllState()
 }
 
 // ============================================================================
-// Port-added offscreen scene (MSAA / CRT shader)
+// Port-added offscreen scene (SMAA / CRT shader)
 // ============================================================================
 static bool CompileBlob(const char* src, const char* name, const char* target,
-                        ID3DBlob** out)
+                        ID3DBlob** out, const char* entry = "main")
 {
     ID3DBlob* err = nullptr;
-    HRESULT hr = D3DCompile(src, strlen(src), name, nullptr, nullptr, "main",
+    HRESULT hr = D3DCompile(src, strlen(src), name, nullptr, nullptr, entry,
                             target, D3DCOMPILE_ENABLE_STRICTNESS, 0, out, &err);
     if (FAILED(hr)) {
         OutputDebugStringA("[MarniDX] ");
@@ -695,7 +822,68 @@ static bool CompileBlob(const char* src, const char* name, const char* target,
     return SUCCEEDED(hr);
 }
 
-// The post shaders are optional: if any of them fails, MSAA and the CRT
+// One immutable lookup texture for SMAA (AreaTex RG8, SearchTex R8).
+static void CreateSmaaLookup(ID3D11Device* device, const unsigned char* bytes,
+                             UINT w, UINT h, UINT pitch, DXGI_FORMAT fmt,
+                             ID3D11Texture2D** tex, ID3D11ShaderResourceView** srv)
+{
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = fmt;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd = {};
+    sd.pSysMem = bytes;
+    sd.SysMemPitch = pitch;
+    if (SUCCEEDED(device->CreateTexture2D(&td, &sd, tex)) &&
+        FAILED(device->CreateShaderResourceView(*tex, nullptr, srv))) {
+        (*tex)->Release();
+        *tex = nullptr;
+    }
+}
+
+// SMAA's six shaders, its constant buffer and lookup textures. Any failure
+// leaves SmaaReady() false and anti-aliasing simply unavailable.
+static void CompileSmaaShaders(MarniDX::Impl* p)
+{
+    std::string src = g_SmaaPrefix_Source;
+    src += g_SmaaHlsl;
+    src += g_SmaaSuffix_Source;
+    ID3DBlob* b = nullptr;
+    struct { const char* entry; bool vs; void** out; } passes[] = {
+        { "SmaaEdgeVS",   true,  (void**)&p->smaaEdgeVS   },
+        { "SmaaEdgePS",   false, (void**)&p->smaaEdgePS   },
+        { "SmaaWeightVS", true,  (void**)&p->smaaWeightVS },
+        { "SmaaWeightPS", false, (void**)&p->smaaWeightPS },
+        { "SmaaBlendVS",  true,  (void**)&p->smaaBlendVS  },
+        { "SmaaBlendPS",  false, (void**)&p->smaaBlendPS  },
+    };
+    for (auto& ps : passes) {
+        if (!CompileBlob(src.c_str(), ps.entry, ps.vs ? "vs_4_0" : "ps_4_0", &b, ps.entry))
+            continue;
+        if (ps.vs)
+            p->device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr,
+                                          (ID3D11VertexShader**)ps.out);
+        else
+            p->device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr,
+                                         (ID3D11PixelShader**)ps.out);
+        b->Release();
+    }
+    D3D11_BUFFER_DESC cb = {};
+    cb.Usage          = D3D11_USAGE_DYNAMIC;
+    cb.ByteWidth      = sizeof(SmaaConstantBuffer);
+    cb.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    p->device->CreateBuffer(&cb, nullptr, &p->smaaCB);
+    CreateSmaaLookup(p->device, areaTexBytes, AREATEX_WIDTH, AREATEX_HEIGHT,
+                     AREATEX_PITCH, DXGI_FORMAT_R8G8_UNORM, &p->smaaAreaTex, &p->smaaAreaSrv);
+    CreateSmaaLookup(p->device, searchTexBytes, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT,
+                     SEARCHTEX_PITCH, DXGI_FORMAT_R8_UNORM, &p->smaaSearchTex, &p->smaaSearchSrv);
+    if (!p->SmaaReady()) crashlog_mark("video: SMAA unavailable (shader or texture setup failed)");
+}
+
+// The post shaders are optional: if any of them fails, SMAA and the CRT
 // shader simply stay unavailable and the game draws straight to the back
 // buffer as before.
 static void CompilePostShaders(MarniDX::Impl* p)
@@ -725,6 +913,7 @@ static void CompilePostShaders(MarniDX::Impl* p)
     rs.CullMode        = D3D11_CULL_NONE;
     rs.DepthClipEnable = TRUE;
     p->device->CreateRasterizerState(&rs, &p->rasterNoScissor);
+    CompileSmaaShaders(p);
 }
 
 void MarniDX::Impl::ReleaseScene()
@@ -734,14 +923,21 @@ void MarniDX::Impl::ReleaseScene()
         context->PSSetShaderResources(0, 1, &none);
         context->OMSetRenderTargets(0, nullptr, nullptr);
     }
-    if (resolveSrv) { resolveSrv->Release(); resolveSrv = nullptr; }
-    if (resolveTex) { resolveTex->Release(); resolveTex = nullptr; }
+    if (smaaOutSrv)   { smaaOutSrv->Release();   smaaOutSrv   = nullptr; }
+    if (smaaOutRtv)   { smaaOutRtv->Release();   smaaOutRtv   = nullptr; }
+    if (smaaOutTex)   { smaaOutTex->Release();   smaaOutTex   = nullptr; }
+    if (smaaBlendSrv) { smaaBlendSrv->Release(); smaaBlendSrv = nullptr; }
+    if (smaaBlendRtv) { smaaBlendRtv->Release(); smaaBlendRtv = nullptr; }
+    if (smaaBlendTex) { smaaBlendTex->Release(); smaaBlendTex = nullptr; }
+    if (smaaEdgesSrv) { smaaEdgesSrv->Release(); smaaEdgesSrv = nullptr; }
+    if (smaaEdgesRtv) { smaaEdgesRtv->Release(); smaaEdgesRtv = nullptr; }
+    if (smaaEdgesTex) { smaaEdgesTex->Release(); smaaEdgesTex = nullptr; }
     if (sceneDsv)   { sceneDsv->Release();   sceneDsv   = nullptr; }
     if (sceneDepth) { sceneDepth->Release(); sceneDepth = nullptr; }
     if (sceneSrv)   { sceneSrv->Release();   sceneSrv   = nullptr; }
     if (sceneRtv)   { sceneRtv->Release();   sceneRtv   = nullptr; }
     if (sceneTex)   { sceneTex->Release();   sceneTex   = nullptr; }
-    msaaActive = 1;
+    smaaActive = FALSE;
     curRtv = rtv;
     curDsv = depthStencilView;
 }
@@ -750,8 +946,8 @@ void MarniDX::Impl::CreateScene()
 {
     {
         char m[128];
-        sprintf(m, "video: scene rebuild %ux%u msaa=%d crt=%d post=%d%d%d%d",
-                (unsigned)bbW, (unsigned)bbH, msaa, (int)crtShader,
+        sprintf(m, "video: scene rebuild %ux%u smaa=%d crt=%d post=%d%d%d%d",
+                (unsigned)bbW, (unsigned)bbH, (int)smaa, (int)crtShader,
                 postVS != nullptr, copyPS != nullptr, crtPS != nullptr, rasterNoScissor != nullptr);
         crashlog_mark(m);
     }
@@ -762,38 +958,15 @@ void MarniDX::Impl::CreateScene()
         return;
     }
 
-    // The highest sample count the device supports, up to the one asked for.
-    int samples = msaa < 1 ? 1 : msaa;
-    while (samples > 1) {
-        UINT q = 0;
-        if (SUCCEEDED(device->CheckMultisampleQualityLevels(
-                DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)samples, &q)) && q > 0) {
-            UINT qd = 0;
-            if (SUCCEEDED(device->CheckMultisampleQualityLevels(
-                    DXGI_FORMAT_D24_UNORM_S8_UINT, (UINT)samples, &qd)) && qd > 0)
-                break;
-        }
-        samples /= 2;
-    }
-
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = bbW; td.Height = bbH; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.SampleDesc.Count = (UINT)samples;
+    td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | (samples == 1 ? D3D11_BIND_SHADER_RESOURCE : 0);
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     bool ok = SUCCEEDED(device->CreateTexture2D(&td, nullptr, &sceneTex)) &&
-              SUCCEEDED(device->CreateRenderTargetView(sceneTex, nullptr, &sceneRtv));
-    if (ok && samples == 1) {
-        ok = SUCCEEDED(device->CreateShaderResourceView(sceneTex, nullptr, &sceneSrv));
-    }
-    if (ok && samples > 1) {
-        D3D11_TEXTURE2D_DESC rd = td;
-        rd.SampleDesc.Count = 1;
-        rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        ok = SUCCEEDED(device->CreateTexture2D(&rd, nullptr, &resolveTex)) &&
-             SUCCEEDED(device->CreateShaderResourceView(resolveTex, nullptr, &resolveSrv));
-    }
+              SUCCEEDED(device->CreateRenderTargetView(sceneTex, nullptr, &sceneRtv)) &&
+              SUCCEEDED(device->CreateShaderResourceView(sceneTex, nullptr, &sceneSrv));
     if (ok) {
         D3D11_TEXTURE2D_DESC dd = td;
         dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -808,7 +981,24 @@ void MarniDX::Impl::CreateScene()
         BindCurrent();
         return;
     }
-    msaaActive = samples;
+    // SMAA's targets. Without them the scene still works; anti-aliasing is
+    // just skipped.
+    if (smaa && SmaaReady()) {
+        auto target = [&](DXGI_FORMAT fmt, ID3D11Texture2D** t,
+                          ID3D11RenderTargetView** rv, ID3D11ShaderResourceView** sv) {
+            D3D11_TEXTURE2D_DESC d = td;
+            d.Format = fmt;
+            return SUCCEEDED(device->CreateTexture2D(&d, nullptr, t)) &&
+                   SUCCEEDED(device->CreateRenderTargetView(*t, nullptr, rv)) &&
+                   SUCCEEDED(device->CreateShaderResourceView(*t, nullptr, sv));
+        };
+        smaaActive =
+            target(DXGI_FORMAT_R8G8_UNORM, &smaaEdgesTex, &smaaEdgesRtv, &smaaEdgesSrv) &&
+            target(DXGI_FORMAT_R8G8B8A8_UNORM, &smaaBlendTex, &smaaBlendRtv, &smaaBlendSrv) &&
+            (!crtShader ||
+             target(DXGI_FORMAT_R8G8B8A8_UNORM, &smaaOutTex, &smaaOutRtv, &smaaOutSrv));
+        if (!smaaActive) crashlog_mark("video: SMAA target creation failed - SMAA off");
+    }
     curRtv = sceneRtv;
     curDsv = sceneDsv;
     const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -816,8 +1006,8 @@ void MarniDX::Impl::CreateScene()
     context->ClearDepthStencilView(sceneDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     BindCurrent();
     char msg[96];
-    sprintf(msg, "[MarniDX] scene %ux%u, MSAA %dx, CRT %s\n",
-            (unsigned)bbW, (unsigned)bbH, samples, crtShader ? "on" : "off");
+    sprintf(msg, "[MarniDX] scene %ux%u, SMAA %s, CRT %s\n",
+            (unsigned)bbW, (unsigned)bbH, smaaActive ? "on" : "off", crtShader ? "on" : "off");
     OutputDebugStringA(msg);
     crashlog_mark(msg);
     s_postTrace = 3;
@@ -833,11 +1023,6 @@ void MarniDX::Impl::BindCurrent()
 
 ID3D11Texture2D* MarniDX::Impl::ResolvedScene()
 {
-    if (!sceneTex) return nullptr;
-    if (msaaActive > 1) {
-        context->ResolveSubresource(resolveTex, 0, sceneTex, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
-        return resolveTex;
-    }
     return sceneTex;
 }
 
@@ -1076,10 +1261,10 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
         p->device->CreateShaderResourceView(p->whiteTex, &wsd, &p->whiteSRV);
     }
 
-    // Port-added: MSAA / CRT post-processing (optional - see CompilePostShaders).
+    // Port-added: SMAA / CRT post-processing (optional - see CompilePostShaders).
     CompilePostShaders(p);
 
-    // bind RTV + set viewport/scissor (the offscreen scene when MSAA or the
+    // bind RTV + set viewport/scissor (the offscreen scene when SMAA or the
     // CRT shader is on, otherwise the back buffer)
     p->CreateScene();
 
@@ -1382,28 +1567,78 @@ void MarniDX::Present()
     // VSync is now also a Video Options setting; that note is why it stays
     // off by default.
 
-    // Port-added: put the offscreen scene on the back buffer - a straight
-    // copy, or through the CRT shader.
+    // Port-added: put the offscreen scene on the back buffer - through SMAA
+    // when it is on, then a straight copy or the CRT shader (SMAA without the
+    // CRT shader writes the back buffer itself).
     if (p->sceneTex && p->rtv) {
-        if (s_postTrace > 0) crashlog_mark("video: post resolve");
-        ID3D11Texture2D* src = p->ResolvedScene();
-        ID3D11ShaderResourceView* srv = (src == p->resolveTex) ? p->resolveSrv : p->sceneSrv;
+        if (s_postTrace > 0) crashlog_mark("video: post begin");
+        ID3D11ShaderResourceView* srv = p->sceneSrv;
         const bool crt = p->crtShader && p->crtPS && p->crtCB;
 
-        p->context->OMSetRenderTargets(1, &p->rtv, nullptr);
         D3D11_VIEWPORT vp = {};
         vp.Width = (float)p->bbW; vp.Height = (float)p->bbH; vp.MaxDepth = 1.0f;
         p->context->RSSetViewports(1, &vp);
         p->context->RSSetState(p->rasterNoScissor);
         p->context->IASetInputLayout(nullptr);
         p->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        p->context->OMSetBlendState(p->blendDisabled, bf, 0xFFFFFFFFu);
+        p->context->OMSetDepthStencilState(p->depthDisabled, 0);
+
+        if (p->smaaActive) {
+            SmaaConstantBuffer scb = {};
+            scb.metrics[0] = 1.0f / (float)p->bbW; scb.metrics[1] = 1.0f / (float)p->bbH;
+            scb.metrics[2] = (float)p->bbW;        scb.metrics[3] = (float)p->bbH;
+            D3D11_MAPPED_SUBRESOURCE m = {};
+            if (SUCCEEDED(p->context->Map(p->smaaCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+                memcpy(m.pData, &scb, sizeof(scb));
+                p->context->Unmap(p->smaaCB, 0);
+            }
+            p->context->VSSetConstantBuffers(0, 1, &p->smaaCB);
+            p->context->PSSetConstantBuffers(0, 1, &p->smaaCB);
+            ID3D11SamplerState* samps[2] = { p->sampLinear, p->sampPoint };
+            p->context->PSSetSamplers(0, 2, samps);
+            const float clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ID3D11ShaderResourceView* noSrv[5] = {};
+
+            // 1. Edges (the edge pass discards pixels without one).
+            p->context->ClearRenderTargetView(p->smaaEdgesRtv, clear0);
+            p->context->OMSetRenderTargets(1, &p->smaaEdgesRtv, nullptr);
+            p->context->VSSetShader(p->smaaEdgeVS, nullptr, 0);
+            p->context->PSSetShader(p->smaaEdgePS, nullptr, 0);
+            p->context->PSSetShaderResources(0, 1, &p->sceneSrv);
+            p->context->Draw(3, 0);
+
+            // 2. Blending weights.
+            p->context->ClearRenderTargetView(p->smaaBlendRtv, clear0);
+            p->context->OMSetRenderTargets(1, &p->smaaBlendRtv, nullptr);
+            p->context->VSSetShader(p->smaaWeightVS, nullptr, 0);
+            p->context->PSSetShader(p->smaaWeightPS, nullptr, 0);
+            ID3D11ShaderResourceView* weightIn[3] = { p->smaaEdgesSrv, p->smaaAreaSrv, p->smaaSearchSrv };
+            p->context->PSSetShaderResources(1, 3, weightIn);
+            p->context->Draw(3, 0);
+
+            // 3. Neighbourhood blending, into the back buffer or, with the
+            // CRT shader still to come, into smaaOut.
+            ID3D11RenderTargetView* out = crt ? p->smaaOutRtv : p->rtv;
+            p->context->PSSetShaderResources(0, 5, noSrv);
+            p->context->OMSetRenderTargets(1, &out, nullptr);
+            p->context->VSSetShader(p->smaaBlendVS, nullptr, 0);
+            p->context->PSSetShader(p->smaaBlendPS, nullptr, 0);
+            ID3D11ShaderResourceView* blendIn[5] = { p->sceneSrv, nullptr, nullptr, nullptr, p->smaaBlendSrv };
+            p->context->PSSetShaderResources(0, 5, blendIn);
+            if (s_postTrace > 0) crashlog_mark("video: post draw (smaa)");
+            p->context->Draw(3, 0);
+            p->context->PSSetShaderResources(0, 5, noSrv);
+            srv = p->smaaOutSrv;
+        }
+
+        if (!p->smaaActive || crt) {
+        p->context->OMSetRenderTargets(1, &p->rtv, nullptr);
         p->context->VSSetShader(p->postVS, nullptr, 0);
         p->context->PSSetShader(crt ? p->crtPS : p->copyPS, nullptr, 0);
         p->context->PSSetShaderResources(0, 1, &srv);
         p->context->PSSetSamplers(0, 1, &p->sampLinear);
-        float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        p->context->OMSetBlendState(p->blendDisabled, bf, 0xFFFFFFFFu);
-        p->context->OMSetDepthStencilState(p->depthDisabled, 0);
         if (crt) {
             CrtConstantBuffer cb;
             cb.rect[0] = (float)p->cx;    cb.rect[1] = (float)p->cy;
@@ -1432,12 +1667,13 @@ void MarniDX::Present()
 
         ID3D11ShaderResourceView* none = nullptr;
         p->context->PSSetShaderResources(0, 1, &none);
+        }
     }
 
     HRESULT phr = p->swapChain->Present(g_bVSync ? 1 : 0, 0);
     if (p->sceneDirty) {
         // A Video Options change: rebuild here, on the main thread's own
-        // stack (see SetMsaa). CreateScene binds the new target itself.
+        // stack (see SetSmaa). CreateScene binds the new target itself.
         p->sceneDirty = FALSE;
         p->CreateScene();
     }
@@ -1469,23 +1705,22 @@ void MarniDX::Present()
 // lies outside the thread's registered stack and kills the process on the
 // spot - no handler runs, so nothing reached crash.log. Present() is called
 // from main_loop on the real stack, so the driver work is safe there.
-void MarniDX::SetMsaa(int samples)
+void MarniDX::SetSmaa(BOOL on)
 {
     Impl* p = m_pImpl;
     if (!p) return;
-    if (samples != 2 && samples != 4 && samples != 8) samples = 1;
-    p->msaa = samples;
+    p->smaa = on ? TRUE : FALSE;
     if (p->ready) p->sceneDirty = TRUE;
 }
 
-int MarniDX::GetMsaa() const { return m_pImpl ? m_pImpl->msaaActive : 1; }
+BOOL MarniDX::GetSmaa() const { return m_pImpl ? m_pImpl->smaaActive : FALSE; }
 
 void MarniDX::SetCrtShader(BOOL on)
 {
     Impl* p = m_pImpl;
     if (!p) return;
     p->crtShader = on ? TRUE : FALSE;
-    if (p->ready) p->sceneDirty = TRUE;     // see SetMsaa
+    if (p->ready) p->sceneDirty = TRUE;     // see SetSmaa
 }
 
 BOOL MarniDX::GetCrtShader() const { return m_pImpl ? m_pImpl->crtShader : FALSE; }
@@ -1958,7 +2193,7 @@ BOOL MarniDX::CaptureBackbufferToRGBA(void** outPixels, DWORD* outW, DWORD* outH
     if (!p || !p->ready || !p->swapChain || !p->device || !p->context)
         return FALSE;
 
-    // Port-added: with MSAA / the CRT shader the frame being drawn is in the
+    // Port-added: with SMAA / the CRT shader the frame being drawn is in the
     // offscreen scene, not the back buffer.
     ID3D11Texture2D* bb = p->ResolvedScene();
     if (bb != nullptr) {

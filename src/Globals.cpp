@@ -58,7 +58,7 @@ BOOL g_bFullScreen = FALSE;
 // tick rate - see the note on MarniDX::Present.
 DWORD g_dwAspectMode = 0;  // port-added: [Display] Aspect, 0 = MARNI_ASPECT_STRETCH (the port's behaviour so far)
 BOOL g_bVSync = FALSE;
-DWORD g_dwMsaa = 1;          // port-added: [Display] MSAA, 1 = off
+BOOL  g_bSmaa = FALSE;        // port-added: [Display] SMAA, 0 = off
 BOOL g_bCrtShader = FALSE;   // port-added: [Display] CRT
 // 0x004d642c
 int g_dwBitDepth = 16;

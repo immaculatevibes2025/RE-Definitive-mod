@@ -23,8 +23,8 @@
 //               STRETCH fills it (the port's behaviour so far), 4:3 keeps the
 //               shape with black bars, 4:3 INTEGER also keeps every game pixel
 //               the same size (whole multiples of 320x240).
-// ANTI-ALIASING MSAA: OFF, 2X, 4X or 8X. On a GPU that cannot do the count
-//               asked for, the renderer quietly uses the highest one it can.
+// ANTI-ALIASING SMAA (MarniDX.cpp, smaa/): OFF or ON. A post-process, so it
+//               smooths edges without the seams multisampling left on some objects.
 // CRT SHADER    A CRT-Royale style shader (MarniDX.cpp, g_CrtPS_Source):
 //               scanlines, aperture-grille mask, halation and curvature.
 //
@@ -42,7 +42,7 @@
 #include "../Globals.h"
 #include "../platform/platform.h"
 #include "../marni/MarniDX.h"        // MARNI_ASPECT_*
-#include "../marni/MarniSystem.h"    // MarniSetAspectMode, MarniSetMsaa, MarniSetCrtShader
+#include "../marni/MarniSystem.h"    // MarniSetAspectMode, MarniSetSmaa, MarniSetCrtShader
 #include "../system/ConfigFile.h"    // ConfigFile_Save
 #include <cstdio>
 #include <cstring>
@@ -165,7 +165,7 @@ enum {
     VID_ROW_DISPLAY = 0,
     VID_ROW_RESOLUTION,
     VID_ROW_ASPECT,
-    VID_ROW_MSAA,
+    VID_ROW_SMAA,
     VID_ROW_CRT,
     VID_ROW_FPS,        // mod: interpolated 60fps ([Display] Interpolate60)
     VID_ROW_APPLY,
@@ -177,22 +177,13 @@ static int s_vidCursor     = 0;
 static int s_vidPendFull   = 0;
 static int s_vidPendRes    = 0;
 static int s_vidPendAspect = 0;
-static int s_vidPendMsaa   = 0;      // index into kVidMsaaSamples
+static int s_vidPendSmaa   = 0;      // 0 = off, 1 = SMAA
 static int s_vidPendCrt    = 0;
 static int s_vidPendFps    = 0;
 extern BOOL g_bInterpolate60;       // Rendering.cpp
 
-static const int kVidMsaaSamples[] = { 1, 2, 4, 8 };
-static const char* const kVidMsaaNames[] = { "OFF", "2X", "4X", "8X" };
-#define VID_MSAA_COUNT 4
-
-static int VideoMenu_MsaaIndex(DWORD samples)
-{
-    for (int i = 0; i < VID_MSAA_COUNT; i++) {
-        if ((DWORD)kVidMsaaSamples[i] == samples) return i;
-    }
-    return 0;
-}
+static const char* const kVidSmaaNames[] = { "OFF", "ON" };
+#define VID_SMAA_COUNT 2
 static int s_vidPrevKeys   = 0;
 static int s_vidPrevF2     = 0;
 
@@ -215,7 +206,7 @@ static void VideoMenu_Open(void)
     s_vidPendFull   = g_bFullScreen ? 1 : 0;
     s_vidPendRes    = VideoMenu_CurrentResIndex();
     s_vidPendAspect = (g_dwAspectMode == MARNI_ASPECT_WIDE) ? MARNI_ASPECT_WIDE : MARNI_ASPECT_4_3;
-    s_vidPendMsaa   = VideoMenu_MsaaIndex(g_dwMsaa);
+    s_vidPendSmaa   = g_bSmaa ? 1 : 0;
     s_vidPendCrt    = g_bCrtShader ? 1 : 0;
     s_vidPendFps    = g_bInterpolate60 ? 1 : 0;
     s_vidPrevKeys   = VideoMenu_SampleKeys();
@@ -234,13 +225,13 @@ static void VideoMenu_Apply(void)
     g_dwAspectMode = (DWORD)s_vidPendAspect;
     MarniSetAspectMode(s_vidPendAspect);
 
-    // MSAA and the CRT shader rebuild the
+    // SMAA and the CRT shader rebuild the
     // offscreen scene, so only touch them when they changed.
-    const DWORD msaa = (DWORD)kVidMsaaSamples[s_vidPendMsaa];
-    if (msaa != g_dwMsaa) {
-        g_dwMsaa = msaa;
-        crashlog_mark("video menu: apply MSAA");
-        MarniSetMsaa((int)msaa);
+    const BOOL smaa = s_vidPendSmaa ? TRUE : FALSE;
+    if (smaa != g_bSmaa) {
+        g_bSmaa = smaa;
+        crashlog_mark("video menu: apply SMAA");
+        MarniSetSmaa(smaa);
     }
     const BOOL crt = s_vidPendCrt ? TRUE : FALSE;
     if (crt != g_bCrtShader) {
@@ -375,9 +366,9 @@ static void VideoMenu_Draw(void)
             VideoMenu_PrintValue(y, kVidAspectNames[s_vidPendAspect], 1,
                                  sel ? VIDCOL_GREEN : VIDCOL_TEXT);
             break;
-        case VID_ROW_MSAA:
+        case VID_ROW_SMAA:
             VideoMenu_Print(40, y, "ANTI-ALIASING", VIDCOL_TEXT);
-            VideoMenu_PrintValue(y, kVidMsaaNames[s_vidPendMsaa], 1,
+            VideoMenu_PrintValue(y, kVidSmaaNames[s_vidPendSmaa], 1,
                                  sel ? VIDCOL_GREEN : VIDCOL_TEXT);
             break;
         case VID_ROW_CRT:
@@ -453,8 +444,8 @@ int video_menu_overlay(void)
         case VID_ROW_ASPECT:
             s_vidPendAspect = VidAspectToggle(s_vidPendAspect);
             break;
-        case VID_ROW_MSAA:
-            s_vidPendMsaa = (s_vidPendMsaa + VID_MSAA_COUNT + step) % VID_MSAA_COUNT;
+        case VID_ROW_SMAA:
+            s_vidPendSmaa = (s_vidPendSmaa + VID_SMAA_COUNT + step) % VID_SMAA_COUNT;
             break;
         case VID_ROW_CRT:
             s_vidPendCrt = !s_vidPendCrt;
@@ -482,8 +473,8 @@ int video_menu_overlay(void)
             s_vidPendRes = (s_vidPendRes + 1) % s_vidResCount;
         } else if (s_vidCursor == VID_ROW_ASPECT) {
             s_vidPendAspect = VidAspectToggle(s_vidPendAspect);
-        } else if (s_vidCursor == VID_ROW_MSAA) {
-            s_vidPendMsaa = (s_vidPendMsaa + 1) % VID_MSAA_COUNT;
+        } else if (s_vidCursor == VID_ROW_SMAA) {
+            s_vidPendSmaa = (s_vidPendSmaa + 1) % VID_SMAA_COUNT;
         } else if (s_vidCursor == VID_ROW_CRT) {
             s_vidPendCrt = !s_vidPendCrt;
         } else if (s_vidCursor == VID_ROW_FPS) {
@@ -745,7 +736,7 @@ void OptTab_Value(int tab, int row, char* out, int size)
         }
         break;
     case VID_ROW_ASPECT: snprintf(out, size, "%s", kVidAspectNames[s_vidPendAspect]); break;
-    case VID_ROW_MSAA:   snprintf(out, size, "%s", kVidMsaaNames[s_vidPendMsaa]); break;
+    case VID_ROW_SMAA:   snprintf(out, size, "%s", kVidSmaaNames[s_vidPendSmaa]); break;
     case VID_ROW_CRT:    snprintf(out, size, "%s", s_vidPendCrt ? "ON" : "OFF"); break;
     case VID_ROW_FPS:    snprintf(out, size, "%s", s_vidPendFps ? "ON" : "OFF"); break;
     }
@@ -779,8 +770,8 @@ static void OptTab_Step(int tab, int row, int step)
     case VID_ROW_ASPECT:
         s_vidPendAspect = VidAspectToggle(s_vidPendAspect);
         break;
-    case VID_ROW_MSAA:
-        s_vidPendMsaa = (s_vidPendMsaa + VID_MSAA_COUNT + step) % VID_MSAA_COUNT;
+    case VID_ROW_SMAA:
+        s_vidPendSmaa = (s_vidPendSmaa + VID_SMAA_COUNT + step) % VID_SMAA_COUNT;
         break;
     case VID_ROW_CRT: s_vidPendCrt = !s_vidPendCrt; break;
     case VID_ROW_FPS: s_vidPendFps = !s_vidPendFps; break;

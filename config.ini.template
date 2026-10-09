@@ -21,8 +21,8 @@ BitDepth=32
 VSync=0
 ; Aspect ratio: 1 = Normal (4:3 with black bars), 2 = Widescreen.
 Aspect=1
-; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples.
-MSAA=1
+; 1 = SMAA anti-aliasing.
+SMAA=0
 ; 1 = CRT shader (CRT style scanlines, phosphor mask, curvature).
 CRT=0
 ; 1 = interpolated 60fps (blends movement between game ticks).

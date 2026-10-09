@@ -44,7 +44,7 @@ const OwnedKey kOwnedKeys[] = {
     { "Input",   "KeyDef" },
     { "Input",   "SideDef" },
     { "Display", "Aspect" },     // port-added (Video Options menu)
-    { "Display", "MSAA" },       // port-added (Video Options menu)
+    { "Display", "SMAA" },       // port-added (Video Options menu)
     { "Display", "CRT" },        // port-added (Video Options menu)
     { "Sound",   "MusicVolume" },    // port-added (title OPTIONS > SOUND OPTIONS)
     { "Sound",   "EffectsVolume" },  // port-added (title OPTIONS > SOUND OPTIONS)
@@ -385,8 +385,8 @@ void ConfigFile_EnsureExists(void)
         "VSync=%d\n"
         "; Aspect ratio: 1 = Normal (4:3 with black bars), 2 = Widescreen.\n"
         "Aspect=1\n"
-        "; Multisample anti-aliasing: 1 = off, 2, 4 or 8 samples.\n"
-        "MSAA=1\n"
+        "; 1 = SMAA anti-aliasing.\n"
+        "SMAA=0\n"
         "; 1 = CRT shader (CRT style scanlines, phosphor mask, curvature).\n"
         "CRT=0\n"
         "; 1 = interpolated 60fps: game logic stays at 30 ticks/s, an in-between\n"
@@ -511,9 +511,8 @@ BOOL ConfigFile_Load(void)
         g_dwAspectMode = (aspect == 2 || aspect == 3) ? MARNI_ASPECT_WIDE
                                                       : MARNI_ASPECT_4_3;
     }
-    // Port-added (Video Options menu): MSAA 1/2/4/8 (anything else = off), CRT.
-    g_dwMsaa         = (DWORD)ReadInt(path, "Display", "MSAA", (int)g_dwMsaa);
-    if (g_dwMsaa != 2 && g_dwMsaa != 4 && g_dwMsaa != 8) g_dwMsaa = 1;
+    // Port-added (Video Options menu): SMAA anti-aliasing, CRT.
+    g_bSmaa          = ReadInt(path, "Display", "SMAA", g_bSmaa ? 1 : 0) ? TRUE : FALSE;
     g_bCrtShader     = ReadInt(path, "Display", "CRT", g_bCrtShader ? 1 : 0) ? TRUE : FALSE;
     // Port-added (title OPTIONS > SOUND OPTIONS): 0-10.
     g_dwMusicVolume   = (DWORD)ReadInt(path, "Sound", "MusicVolume", (int)g_dwMusicVolume);
@@ -700,7 +699,7 @@ void ConfigFile_Save(void)
     snprintf(values[7], sizeof(values[7]), "%s", keyHex);
     snprintf(values[8], sizeof(values[8]), "%s", sideHex);
     snprintf(values[9], sizeof(values[9]), "%d", g_dwAspectMode == MARNI_ASPECT_WIDE ? 2 : 1);
-    snprintf(values[10], sizeof(values[10]), "%u", (unsigned)g_dwMsaa);
+    snprintf(values[10], sizeof(values[10]), "%d", g_bSmaa ? 1 : 0);
     snprintf(values[11], sizeof(values[11]), "%d", g_bCrtShader ? 1 : 0);
     snprintf(values[12], sizeof(values[12]), "%u", (unsigned)g_dwMusicVolume);
     snprintf(values[13], sizeof(values[13]), "%u", (unsigned)g_dwEffectsVolume);

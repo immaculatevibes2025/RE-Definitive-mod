@@ -426,13 +426,13 @@ int MarniDX::GetAspectMode() const
     return m_pImpl != nullptr ? m_pImpl->aspectMode : MARNI_ASPECT_STRETCH;
 }
 
-// Port-added (Video Options menu). MSAA and the CRT shader are implemented in
+// Port-added (Video Options menu). SMAA and the CRT shader are implemented in
 // the D3D11 backend only; this backend keeps the settings so the menu and
 // config.ini round-trip, and draws as before.
-static int  s_glMsaa = 1;
+static BOOL s_glSmaa = FALSE;
 static BOOL s_glCrt  = FALSE;
-void MarniDX::SetMsaa(int samples)  { s_glMsaa = (samples == 2 || samples == 4 || samples == 8) ? samples : 1; }
-int  MarniDX::GetMsaa() const       { return 1; }
+void MarniDX::SetSmaa(BOOL on)      { s_glSmaa = on ? TRUE : FALSE; }
+BOOL MarniDX::GetSmaa() const       { return FALSE; }
 void MarniDX::SetCrtShader(BOOL on) { s_glCrt = on ? TRUE : FALSE; }
 BOOL MarniDX::GetCrtShader() const  { return FALSE; }
 
