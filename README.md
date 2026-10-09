@@ -126,7 +126,7 @@ Widescreen — Some camera angles may be tricky to view correctly when playing i
 
 📝 TODO
 
-Battle Game Accuracy — Improve the Battle Game to more accurately match the original Sega Saturn version, including enemy health and other gameplay details.
+Battle Game Accuracy — Improve the Battle Game to more accurately match the original Sega Saturn version, including enemy health and other details.
 
 Tick Accuracy — Improve the Tick's behavior to more accurately match the original Sega Saturn version. 
 
