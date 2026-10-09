@@ -176,14 +176,14 @@ jobs:
           $deployArgs = @(
             '--release', '--no-translations', '--no-system-d3d-compiler',
             '--no-opengl-sw', '--dir', $out, '--plugindir', "$out/plugins",
-            'tools/asset_migrator/build/RE 1 Asset Migrator.exe'
+            'tools/asset_migrator/build/RE Asset Migrator.exe'
           )
           windeployqt @deployArgs
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
           # The Qt plugin folders live under plugins/; qt.conf points Qt there.
           Set-Content "$out/qt.conf" "[Paths]`r`nPlugins = plugins"
           # --dir deploys the libraries and plugins but not the binaries.
-          Copy-Item "tools/asset_migrator/build/RE 1 Asset Migrator.exe" $out
+          Copy-Item "tools/asset_migrator/build/RE Asset Migrator.exe" $out
           # The headless core verifier the README documents.
           Copy-Item "tools/asset_migrator/build/re1am_selftest.exe" $out
           Copy-Item "tools/asset_migrator/README.md" $out

@@ -127,7 +127,7 @@ Builds the Sega Saturn extras (Ticks, Zombie Wesker, the Saturn outfits, the Bat
 rooms and music, the Tick sounds, and the title-menu / Option Mode art) from the player's
 own *Resident Evil* Saturn disc image (`.cue`, `.bin` or `.iso`) into `<output folder>/USA`.
 The tab runs `RE1 Saturn Extractor.exe` (built by `tools/saturn/build_exe.bat`), which must
-sit next to `RE 1 Asset Migrator.exe` (or in a `saturn` folder beside it), and shows its log.
+sit next to `RE Asset Migrator.exe` (or in a `saturn` folder beside it), and shows its log.
 
 ## Requirements
 
@@ -154,7 +154,7 @@ cmake --build tools/asset_migrator/build --config Release
 of naming one, so it works on both a VS 2022 and a VS 2026 machine; pass
 `-Generator` to override (`-Generator Ninja` also works, from a shell with the
 MSVC environment loaded). The Visual Studio generators are multi-config, so
-`build.ps1` writes `tools/asset_migrator/build/Release/RE 1 Asset Migrator.exe`;
+`build.ps1` writes `tools/asset_migrator/build/Release/RE Asset Migrator.exe`;
 a single-config generator writes it at the root of the build directory.
 
 ## Package a portable folder
