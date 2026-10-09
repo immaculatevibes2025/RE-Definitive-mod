@@ -59,7 +59,7 @@ The mod combines content from different releases of Resident Evil and adds sever
 
 - Anti-Aliasing — Smooth jagged edges with SMAA anti-aliasing, switched on or off in the in-game video options.
 
-- (Optional) Widescreen (Crop) — Play the game in a cropped widescreen to not stretch the original 4:3 backgrounds. By default the game preserves the original 4:3 aspect ratio.
+- Widescreen (Crop) — Play the game in a cropped widescreen to not stretch the original 4:3 backgrounds. By default the game preserves the original 4:3 aspect ratio.
 
 - 60 FPS — An interpolated 60 FPS option that preserves the original 30 FPS game logic while providing smoother visual motion.
 
