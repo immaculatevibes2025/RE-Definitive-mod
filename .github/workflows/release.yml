@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     branches: [main]
+    # Markdown-only pushes (README edits and the like) change no build output.
+    paths-ignore:
+      - "**.md"
   workflow_dispatch:
 
 permissions:
@@ -98,8 +101,7 @@ jobs:
           path: ${{ steps.stage.outputs.zip }}
 
   build-asset-migrator:
-    # Needs the Windows game build: its package ships inside this one.
-    needs: [release-please, build-windows]
+    needs: release-please
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -150,21 +152,10 @@ jobs:
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name "RE1 Saturn Extractor" --icon $ico --add-data "$ico;." --paths . --hidden-import satlz --hidden-import satmodel --hidden-import satsnd --hidden-import satseq --hidden-import tick2pc --hidden-import numpy --hidden-import PIL.Image @data saturn_extractor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: residentevil-*-windows-x86
-          path: game-dl
-          merge-multiple: true
-
-      - name: Deploy Qt runtime and stage release files
-        id: stage
+      - name: Deploy Qt runtime and stage the migrator
         run: |
-          $version = "${{ needs.release-please.outputs.version }}"
-          if (-not $version) { $version = $env:GITHUB_SHA.Substring(0,7) }
-          # One Windows package: the migrator, with the game in the
-          # "Resident Evil Definitive" folder its tabs write into by default.
-          $name = "RE-Definitive-Mod"
-          $out = "stage/$name"
+          # package-windows adds the game and zips the result.
+          $out = "stage/migrator"
           New-Item -ItemType Directory -Force $out | Out-Null
           # windeployqt assembles the runtime tree itself (the Qt DLLs, the
           # plugin directories, the VC redist installer) and --dir keeps it out
@@ -189,6 +180,39 @@ jobs:
           Copy-Item "tools/asset_migrator/README.md" $out
           Copy-Item "tools/saturn/dist/RE1 Saturn Extractor.exe" $out
           Copy-Item "LICENSE" $out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-migrator-staged
+          path: stage/migrator
+          retention-days: 1
+
+  # One Windows package: the migrator, with the game in the
+  # "Resident Evil Definitive" folder its tabs write into by default. Its own
+  # job so the game and the migrator compile side by side.
+  package-windows:
+    needs: [release-please, build-windows, build-asset-migrator]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: asset-migrator-staged
+          path: stage/RE-Definitive-Mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: residentevil-*-windows-x86
+          path: game-dl
+          merge-multiple: true
+
+      - name: Add the game and zip the package
+        id: stage
+        run: |
+          $name = "RE-Definitive-Mod"
+          $out = "stage/$name"
           $game = Get-ChildItem game-dl -Filter "residentevil-*-windows-x86.zip" | Select-Object -First 1
           if (-not $game) { throw "Windows game package not found" }
           Expand-Archive $game.FullName -DestinationPath "$out/Resident Evil Definitive"
@@ -206,7 +230,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" "${{ steps.stage.outputs.zip }}" --clobber
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" "${{ steps.stage.outputs.zip }}" --clobber --repo "${{ github.repository }}"
 
   # Linux x86-32. Shares every game translation unit with Windows; the SDL2 +
   # OpenGL platform layer stands in for the MarniDX/Win32 backend. The runner is
