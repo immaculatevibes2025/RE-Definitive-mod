@@ -35,7 +35,7 @@ Director's Cut Support — This mod supports the Director's Cut version of Resid
 
 Overhauled Options Menu — A completely updated in-game options menu with video, sound, control and gameplay settings.
 
-CRT Shader — Add a classic CRT-style presentation directly through the in-game options.
+CRT Shader — A classic CRT-style presentation directly through the in-game options.
 
 Anti-Aliasing — Improve the game's visual presentation with built-in anti-aliasing options.
 
@@ -55,21 +55,16 @@ Mouse Button Support — Mouse buttons can now be assigned and used as in-game c
 
 Expanded Keyboard Support — Additional keyboard keys, including Shift and Tab, can now be used for in-game controls.
 
-Optional Gameplay Changes: The new gameplay features are completely optional. They can be disabled if you want to preserve the original gameplay experience of the 1996 release. The goal is to simply provide modern conveniences.
+Optional Gameplay Changes: The new gameplay features are completely optional. They can be disabled if you want to preserve the original gameplay experience of the 1996 release. The goal is to simply provide modern conveniences. 
+They are disabled by default. 
 
 The aim is to make these features available directly within the game, eliminating the need for a separate configuration program or manual editing of config.ini.
 
 📦 Requirements
 
-This mod requires the Resident Evil 1 PC Decompilation. (Also known as Resident Evil 1 PC Port Decomp)
+Only **Windows** (For now)
 
-https://github.com/ecruells/resident-evil-pc-decomp
-
-Important: This mod is not compatible with other PC versions of Resident Evil, including the GOG and Steam releases.
-
-You will also need:
-
-A legitimate PC copy of Resident Evil to build the PC Decompilation.
+A legitimate PC copy of Resident Evil (Steam, GOG etc) to extract the PC assets from. 
 
 (Optional) A legitimate Sega Saturn copy of Resident Evil to extract the Saturn assets.
 
@@ -77,13 +72,11 @@ A legitimate PC copy of Resident Evil to build the PC Decompilation.
 
 🔧 How to Install
 
-1. Download the Asset Migrator and the RE.exe
+1. Download the latest build
 
-2. Extract the Assets
+2. Extract the Assets using the "RE Asset Migrator.exe" 
 
-3. Build the Game
-
-4. Play
+3. Play
 
 Important: This project does not provide copyrighted game data or game assets. You must supply your own copies of the PC, Sega Saturn and PlayStation versions of Resident Evil.
 
@@ -107,8 +100,6 @@ Ticks — The Tick may exhibit slightly different behavior compared to its imple
 
 Widescreen — Some camera angles may be tricky to view correctly when playing in widescreen due to the game's original fixed-camera design.
 
-Decompilation Bugs — The underlying Resident Evil 1 PC Decompilation may contain bugs or issues that are unrelated to this mod.
-
 📝 TODO
 
 Battle Game Accuracy — Improve the Battle Game to more accurately match the original Sega Saturn version, including enemy health and other gameplay details.
@@ -116,6 +107,10 @@ Battle Game Accuracy — Improve the Battle Game to more accurately match the or
 Tick Accuracy — Improve the Tick's behavior to more accurately match the original Sega Saturn version. 
 
 Bug Fixes — Investigate and squash any remaining bugs and unintended issues found within the mod.
+
+More Platforms - Support for Linux and Steamdeck. 
+
+Resident Evil 1.5 Content - The decompilation should allow for more ambitious modding opportunities. 
 
 
 ## License
