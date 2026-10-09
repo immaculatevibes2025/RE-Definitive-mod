@@ -55,7 +55,7 @@ CRT Shader — A classic CRT-style presentation directly through the in-game opt
 
 Anti-Aliasing — Smooth jagged edges with SMAA anti-aliasing, switched on or off in the in-game video options.
 
-Widescreen — Play the game in widescreen, with an option to preserve the original 4:3 aspect ratio.
+(Optional) Widescreen (Crop) — Play the game in a cropped widescreen to not stretch the original 4:3 backgrounds. By default the game preserves the original 4:3 aspect ratio.
 
 60 FPS — An interpolated 60 FPS option that preserves the original 30 FPS game logic while providing smoother visual motion.
 
