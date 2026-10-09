@@ -37,7 +37,7 @@ Overhauled Options Menu — A completely updated in-game options menu with video
 
 CRT Shader — A classic CRT-style presentation directly through the in-game options.
 
-Anti-Aliasing — Improve the game's visual presentation with built-in anti-aliasing options.
+Anti-Aliasing — Smooth jagged edges with SMAA anti-aliasing, switched on or off in the in-game video options.
 
 Widescreen — Play the game in widescreen, with an option to preserve the original 4:3 aspect ratio.
 
@@ -85,6 +85,8 @@ Important: This project does not provide copyrighted game data or game assets. Y
 ❤️ Credits
 
 This project would not be possible without the work of the Resident Evil community and the developers of the Resident Evil 1 PC Decompilation project.
+
+SMAA — The anti-aliasing uses SMAA (Enhanced Subpixel Morphological Antialiasing) by Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and Diego Gutierrez, used under the MIT license ([iryoku/smaa](https://github.com/iryoku/smaa)).
 
 Claude — This project was also used as a test to see how well Anthropic's new Opus 5.5 model could assist with bug testing, coding, debugging, and general development tasks.
 
