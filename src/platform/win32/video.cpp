@@ -132,12 +132,16 @@ static BOOL MciOpenAndPlay(const char* absPath, int playToMs)
 
     s_windowCreated = TRUE;
 
-    // Fill the whole client area. The MCI AVI video is always 320x240; MCI
-    // handles centering within the destination.
+    // Mod: the largest centred 4:3 box of the client area, so the 320x240
+    // movie is never stretched on a wide window (MCI scales to the
+    // destination). "put destination at" takes x, y, width, height.
     RECT clientRect;
     GetClientRect(g_hWnd, &clientRect);
-    sprintf_s(cmd, sizeof(cmd), "put movie destination at 0 0 %d %d",
-              clientRect.right - 1, clientRect.bottom - 1);
+    int bx = 0, by = 0, bw = 0, bh = 0;
+    MarniComputeContentRect(MARNI_ASPECT_4_3, clientRect.right, clientRect.bottom,
+                            &bx, &by, &bw, &bh);
+    sprintf_s(cmd, sizeof(cmd), "put movie destination at %d %d %d %d",
+              bx, by, bw, bh);
     mciSendStringA(cmd, NULL, 0, g_hWnd);
 
     // The cut points are frame numbers; MCIAVI already defaults to the frames
@@ -545,6 +549,10 @@ static void Present(void)
     dx->GetBackBufferSize(&bw, &bh);
     if (bw == 0 || bh == 0) return;
 
+    // Mod: FMVs are always 4:3. The widescreen scene viewport may still be
+    // selected from the last game frame; the content viewport is the 4:3 box
+    // in both aspect modes, so the frame below fills it unstretched.
+    dx->SetViewportMode(MARNI_VP_CONTENT, 0.0f);
     dx->Clear(0.0f, 0.0f, 0.0f, 1.0f);
     const int frameMs = s_frameIndex > 0
         ? (int)((double)s_frameIndex * 1000.0 / s_fps + 0.5) : 0;

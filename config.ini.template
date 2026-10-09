@@ -63,9 +63,6 @@ SkipUnskippableFmv=0
 
 [Mods]
 ; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.
-; Loads enemy/em1016.emd and em1116.emd (tools/saturn/tick2pc.py), the Tick's
-; close-range decapitation and sounds (sound/TK_*.wav from
-; tools/saturn/ticksnd.py). Anything missing falls back to the Hunter.
 Ticks=0
 QuickKnife=0
 QuickTurn=0
