@@ -34,6 +34,9 @@ Definitive Mod Exclusives, CRT Filter, Widescreen and Battle Game:
 
 
 
+
+
+
 ✨ Features
 
 The mod combines content from different releases of Resident Evil and adds several improvements designed to make the PC version more convenient and enjoyable to play.
