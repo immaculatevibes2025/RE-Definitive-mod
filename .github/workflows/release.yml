@@ -214,6 +214,8 @@ jobs:
   # tools/package_linux.sh bundles the 32-bit SDL2/ffmpeg objects so the archive
   # does not depend on the target's package set.
   build-linux:
+    # Off for now; delete "if: false" to build Linux again.
+    if: false
     needs: release-please
     runs-on: ubuntu-24.04
     steps:
