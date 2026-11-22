@@ -21,6 +21,8 @@
 #include <cstdio>
 #include "../system/AssetPath.h"
 #include "../system/ConfigFile.h"   // Mod: bindings save to config.ini
+#include "game/Bonus.h"             // Mod: the title's Bonus screen
+#include "game/BioCard.h"           // g_itemboxSlots (the Bonus weapon preview)
 
 // Mod: the title screen's OPTIONS > CONTROLS opens this menu (VideoMenu.cpp,
 // title_options_state). At the title no player model, weapon animation or room
@@ -28,6 +30,7 @@
 // the exit leaves the (absent) room alone; the key / joypad configuration
 // itself is unchanged.
 int g_optFromTitle = 0;
+int g_optBonusMode = 0;     // Mod: run as the title's Bonus screen (VideoMenu.cpp)
 int g_optMenuActive = 0;   // Mod: 1 while Option Mode runs (InputSystem.cpp)
 
 // ============================================================================
@@ -225,6 +228,9 @@ static const int* const     PTR_DAT_004c0538[2] = { s_optJoyAnimLen_Chris, s_opt
 static const char s_optBgKeyConfig[]  = GAME_DATA_ROOT "data\\Jopt06m.tim"; // 0x004c4400
 static const char s_optBgDisplayCfg[] = GAME_DATA_ROOT "data\\Opt11m.tim";  // 0x004c43c8
 static const char s_optBgJoystick[]   = GAME_DATA_ROOT "data\\Side06.tim";  // 0x004c43e4
+// Mod: the Bonus screen's art (tools/saturn/option_tabs.py --bonus): title
+// BONUS, rows EXIT / CHRIS / JILL / REBECCA / WEAPONS.
+static const char s_optBgBonus[]      = GAME_DATA_ROOT "data\\Bonus06m.tim";
 
 // Options menu light data (3 lights × 16 bytes each)
 // 0x00d22700: Light 0 {pos_x, pos_y, pos_z, r, g, b, pad, pad}
@@ -865,6 +871,10 @@ void options_init_keybind_display(void)
 }
 
 
+// Mod: the Bonus screen's cursor (see bonus_update below).
+static int s_bonPanel = 1;          // 0 EXIT, 1-3 CHRIS / JILL / REBECCA, 4 WEAPONS
+static int s_bonFocus = 0;          // 0 the left rows, 1 the list
+
 // ============================================================================
 // options_render_cursor (0x00477490)
 // Draw cursor highlight rectangle on the options menu.
@@ -877,6 +887,16 @@ void options_render_cursor(void)
     static RectDrawDesc hl;
     int x, y, w;
     if (s_optMainState == 9) return;    // Mod: QUIT confirm has its own cursor
+    if (g_optBonusMode) {               // Mod: Bonus - one full-width row each
+        hl.textureId = 0x40000000;
+        hl.x = (short)(12 - g_ScreenOffsetX);
+        hl.y = (short)(17 + 12 * s_bonPanel + 1 - g_ScreenOffsetY);
+        hl.w = 115;
+        hl.h = 10;
+        hl.r = hl.g = hl.b = (s_bonFocus == 0) ? 112 : 56;   // dimmer while in the list
+        draw_rect(&hl, 100, 1);
+        return;
+    }
     // Rows (Jopt06m / Opt11m), 12 px each from y 17: EXIT, VIDEO | SOUND,
     // GAME PAD | KEYBOARD, GAMEPLAY, QUIT GAME.
     x = 12; w = 115;
@@ -945,6 +965,260 @@ static void options_render_settings_tab(int tab, int active)
     }
 }
 
+
+// ============================================================================
+// Mod: the title's BONUS screen. Option Mode's own screen and plumbing
+// (g_optBonusMode): the left rows pick EXIT / CHRIS / JILL / REBECCA /
+// WEAPONS, the right column lists that character's outfits (or the bonus
+// weapons), and the portrait box shows the highlighted outfit on the model,
+// turning. ACTION on an outfit wears it (Bonus.cpp, SAVE\bonus.dat): it is
+// the outfit every new game starts in, until the costume room changes it.
+// Outfits unlock as Bonus.cpp has it - by finishing the game.
+// ============================================================================
+extern int OptMenu_SampleKeys(void);           // VideoMenu.cpp: arrows/ENTER/ESC + pad
+#define BKEY_LEFT    0x001
+#define BKEY_RIGHT   0x002
+#define BKEY_UP      0x004
+#define BKEY_DOWN    0x008
+#define BKEY_CONFIRM 0x010
+#define BKEY_ESC     0x020
+
+#define BON_ROW_EXIT     0
+#define BON_ROW_WEAPONS  4
+static int s_bonRow = 0;            // cursor in the list
+static int s_bonPrevKeys = 0;
+
+static const unsigned char kBonCharModel[BONUS_CHAR_COUNT] = { CHAR_CHRIS, CHAR_JILL, CHAR_REBECCA };
+static const int kBonWeaponOwner[BONUS_WEAPON_COUNT] = {
+    BONUS_CHAR_CHRIS, BONUS_CHAR_JILL, BONUS_CHAR_JILL, BONUS_CHAR_CHRIS,
+};
+static const int kBonWeaponItem[BONUS_WEAPON_COUNT] = {
+    ITEM_ROCKET_LAUNCHER, ITEM_COLT_PYTHON_MAG, ITEM_INGRAM, ITEM_MINIMI,
+};
+
+// --- Preview (the decomp's GameOptions.cpp BONUS page, fitted to the box) ---
+// Camera on +Z looking at the origin, model placed in world space. One world
+// unit is BON_LENS / BON_CAMERA_Z = 0.0364 px, so a ~3020-unit player is ~110
+// px: the box's inside (x 18-118, y 90-220), feet on its spotlight at y ~210.
+// The camera's right axis is world -X, so a positive x is to the left.
+#define BON_CAMERA_Z  10600
+#define BON_LENS      0x182
+#define BON_FLOOR_Y   2472      // (210 - 120) px below the centre
+#define BON_MODEL_X   2527      // (160 - 68) px left of the centre
+#define BON_TURN_STEP 12        // of 4096 per frame
+
+static int s_bonPrevChar = -1, s_bonPrevOutfit = -1, s_bonPrevItem = 0, s_bonReady = 0;
+
+static void bonus_scene_setup(void)
+{
+    static int light0[4], light1[4], light2[4];
+    light0[0] = 100;  light0[1] = 0x50; light0[2] = -780;
+    light1[0] = -100; light1[1] = 0x50; light1[2] = -780;
+    light2[0] = -100; light2[1] = 0;    light2[2] = -780;
+    int* const lights[3] = { light0, light1, light2 };
+    for (int i = 0; i < 3; i++) {
+        unsigned char* rgb = (unsigned char*)&lights[i][3];
+        rgb[0] = 0x80; rgb[1] = 0x80; rgb[2] = 0x80;
+        FUN_0040ac80(i, lights[i]);
+    }
+    setBackColor(1024, 1024, 1024);
+    static int camera[8];               // from x/y/z, to x/y/z, roll
+    memset(camera, 0, sizeof(camera));
+    camera[2] = BON_CAMERA_Z;
+    set_scene_render_param(BON_LENS);
+    MatrixToCamera((MATRIX*)camera);
+    SetSubpixelOffset(160, 120);
+}
+
+// Load `character` wearing `outfit` (weaponItem: an item id held aimed, 0 none).
+static void bonus_preview_load(int character, int outfit, int weaponItem)
+{
+    if (s_bonReady && character == s_bonPrevChar && outfit == s_bonPrevOutfit &&
+        weaponItem == s_bonPrevItem) return;
+    const unsigned char savedEquipped = g_EquippedItemId;
+    const unsigned char savedSlotId = g_itemboxSlots[48].Id;
+    g_EquippedItemId = weaponItem != 0 ? 1 : 0;
+    if (weaponItem != 0) g_itemboxSlots[48].Id = (unsigned char)weaponItem;
+    g_playerEntity.id = kBonCharModel[character];
+    bonus_preview_outfit(outfit);
+    SetupCharacterData();
+    bonus_preview_outfit(-1);
+    g_itemboxSlots[48].Id = savedSlotId;
+    g_EquippedItemId = savedEquipped;
+
+    ENTITY = (Entity*)&g_playerEntity;
+    g_playerEntity.unk_8c = 0;
+    g_playerEntity.attackAnim = 0;
+    g_playerEntity.animation_frame_id = 0;
+    g_playerEntity.unk_bf = 0;
+    g_playerEntity.scaMatrixData.localMatrix.t[0] = BON_MODEL_X;
+    g_playerEntity.scaMatrixData.localMatrix.t[1] = BON_FLOOR_Y;
+    g_playerEntity.scaMatrixData.localMatrix.t[2] = 0;
+    g_playerEntity.position.pad = 0;
+    g_playerEntity.speed.x = 0;
+    if (!s_bonReady) g_playerEntity.directionAngle = 0xce4;
+    bonus_scene_setup();
+    s_bonPrevChar = character;
+    s_bonPrevOutfit = outfit;
+    s_bonPrevItem = weaponItem;
+    s_bonReady = 1;
+}
+
+static void bonus_preview_draw(void)
+{
+    if (!s_bonReady) return;
+    g_playerEntity.zoneFlags = 1;
+    ENTITY = (Entity*)&g_playerEntity;
+    g_playerEntity.directionAngle = (short)((g_playerEntity.directionAngle + BON_TURN_STEP) & 0xFFF);
+    if (s_bonPrevItem == 0) {
+        g_playerEntity.attackAnim = 0;
+        Joint_move(0, g_playerEntity.animHeader, g_playerEntity.animBase, 0x400);
+    } else {
+        // The aimed pose: the last frame of the weapon file's raise motion
+        // (motion 7, or 5 for the Ingram / Minimi held at its window's end).
+        const int special = g_playerEntity.equippedWeaponId > 0x6e;
+        const int motion = special ? 5 : 7;
+        const unsigned int table = g_playerEntity.jointMoveData1;
+        unsigned int frame = *(unsigned short*)(table + motion * 4) - 1;
+        if (special) {
+            const unsigned int end = g_weaponSpecialFrameWindows[
+                ((g_playerEntity.id & 1) * 3 + ((motion - 1) & 3)) * 4 + 1];
+            if (frame > end - 1) frame = end - 1;
+        }
+        g_playerEntity.attackAnim = (unsigned char)motion;
+        g_playerEntity.animation_frame_id = (unsigned char)frame;
+        g_playerEntity.unk_bf = 0;
+        g_playerEntity.unk_8c = 0;
+        Joint_move(0, g_playerEntity.jointMoveData0, g_playerEntity.jointMoveData1, 0x400);
+    }
+    EntityComputeJointWorldMatrices(g_playerEntity.unk_ca);
+    EntityApplyLookAtRotation();
+    options_render_entity((int)&g_playerEntity);
+}
+
+static int bonus_list_count(void)
+{
+    if (s_bonPanel == BON_ROW_WEAPONS) return BONUS_WEAPON_COUNT;
+    return BONUS_OUTFIT_COUNT;
+}
+
+// What the box shows for the current cursor.
+static void bonus_preview_update(void)
+{
+    if (s_bonPanel >= 1 && s_bonPanel <= 3) {
+        const int c = s_bonPanel - 1;
+        int outfit = bonus_outfit_get(c);
+        if (s_bonFocus == 1 && bonus_outfit_available(c, s_bonRow)) outfit = s_bonRow;
+        bonus_preview_load(c, outfit, 0);
+    } else if (s_bonPanel == BON_ROW_WEAPONS && s_bonFocus == 1 && bonus_weapon_unlocked(s_bonRow)) {
+        const int c = kBonWeaponOwner[s_bonRow];
+        bonus_preview_load(c, bonus_outfit_get(c), kBonWeaponItem[s_bonRow]);
+    }
+}
+
+static void bonus_open(void)
+{
+    bonus_load();
+    s_bonPanel = 1;
+    s_bonFocus = 0;
+    s_bonRow = 0;
+    s_bonReady = 0;
+    s_bonPrevKeys = OptMenu_SampleKeys();
+    bonus_preview_update();
+}
+
+// Returns 1 to leave the screen.
+static int bonus_update(void)
+{
+    const int keys = OptMenu_SampleKeys();
+    const int edge = keys & ~s_bonPrevKeys;
+    s_bonPrevKeys = keys;
+
+    if (s_bonFocus == 0) {
+        if (edge & BKEY_ESC) { play_sfx(3, 5, 0); return 1; }
+        if (edge & (BKEY_UP | BKEY_DOWN)) {
+            s_bonPanel = (s_bonPanel + ((edge & BKEY_UP) ? 4 : 1)) % 5;
+            play_sfx(3, 4, 0);
+            bonus_preview_update();
+        }
+        if (edge & BKEY_CONFIRM) {
+            if (s_bonPanel == BON_ROW_EXIT) { play_sfx(3, 5, 0); return 1; }
+            play_sfx(3, 6, 0);
+            s_bonFocus = 1;
+            s_bonRow = (s_bonPanel == BON_ROW_WEAPONS) ? 0 : bonus_outfit_get(s_bonPanel - 1);
+            bonus_preview_update();
+        }
+        return 0;
+    }
+
+    const int n = bonus_list_count();
+    if (edge & BKEY_ESC) {
+        play_sfx(3, 5, 0);
+        s_bonFocus = 0;
+        bonus_preview_update();
+        return 0;
+    }
+    if (edge & (BKEY_UP | BKEY_DOWN)) {
+        s_bonRow = (s_bonRow + ((edge & BKEY_UP) ? n - 1 : 1)) % n;
+        play_sfx(3, 4, 0);
+        bonus_preview_update();
+    }
+    if (edge & (BKEY_CONFIRM | BKEY_LEFT | BKEY_RIGHT)) {
+        if (s_bonPanel == BON_ROW_WEAPONS) {
+            if (bonus_weapon_unlocked(s_bonRow)) {
+                bonus_weapon_set_enabled(s_bonRow, !bonus_weapon_enabled(s_bonRow));
+                bonus_save();
+                play_sfx(3, 6, 0);
+            }
+        } else if (edge & BKEY_CONFIRM) {
+            const int c = s_bonPanel - 1;
+            if (bonus_outfit_available(c, s_bonRow)) {
+                bonus_outfit_set(c, s_bonRow);
+                bonus_save();
+                play_sfx(3, 6, 0);
+            }
+        }
+    }
+    return 0;
+}
+
+static void bonus_render(void)
+{
+    const int listActive = (s_bonFocus == 1);
+    char value[24];
+    if (s_bonPanel == BON_ROW_EXIT) return;
+    for (int row = 0; row < bonus_list_count(); row++) {
+        const int y = s_optKeyLabelY[row];
+        const int lit = listActive && row == s_bonRow;
+        const char* name;
+        value[0] = 0;
+        unsigned char col = lit ? 1 : 0;
+        if (s_bonPanel == BON_ROW_WEAPONS) {
+            if (bonus_weapon_unlocked(row)) {
+                name = bonus_weapon_name(row);
+                strcpy(value, bonus_weapon_enabled(row) ? "ON" : "OFF");
+            } else {
+                name = "?????";
+                if (!lit) col = 0xF0;
+            }
+        } else {
+            const int c = s_bonPanel - 1;
+            if (bonus_outfit_available(c, row)) {
+                name = bonus_outfit_name(row);
+                if (bonus_outfit_get(c) == row) strcpy(value, "WORN");
+            } else if (bonus_outfit_exists(c, row)) {
+                name = "?????";                         // not unlocked yet
+                if (!lit) col = 0xF0;
+            } else {
+                name = bonus_outfit_name(row);          // its files are not installed
+                strcpy(value, "N/A");
+                if (!lit) col = 0xF0;
+            }
+        }
+        opt_print(0xa2, y, col, name);
+        if (value[0]) opt_print(314 - (int)strlen(value) * 8, y, col, value);
+    }
+}
 
 // ============================================================================
 // options_render_entity (0x004775b0)
@@ -1031,6 +1305,12 @@ checkSwitchZone:
 // ============================================================================
 void options_menu_render(void)
 {
+    if (g_optBonusMode) {           // Mod: the Bonus screen
+        bonus_render();
+        bonus_preview_draw();
+        options_render_cursor();
+        return;
+    }
     if (s_optMainState == 9) {
         // Mod: QUIT GAME confirm.
         opt_print(0xb4, 96, 0, "QUIT TO TITLE?");
@@ -2929,7 +3209,12 @@ void options_menu(void)
     g_main_state_flags = (g_main_state_flags & ~MSF_SCREEN_MODE_MASK) | MSF_SCREEN_REBUILD;
 
     // Load options background texture
-    LoadFile(s_optBgKeyConfig, &g_TimImageBuffer, 0x20);
+    // Mod: the Bonus screen has its own art; an install without it (an older
+    // Saturn Extractor run) falls back to Option Mode's.
+    if (!g_optBonusMode ||
+        LoadFile(s_optBgBonus, &g_TimImageBuffer, 0x20) == (size_t)-1) {
+        LoadFile(s_optBgKeyConfig, &g_TimImageBuffer, 0x20);
+    }
     display_image(8, g_TimImageBuffer__bitmap, 320, 240);
     title_setup_texture_pages(8, 1);
     // empty_00470960(8): empty in the original - call dropped
@@ -2975,6 +3260,11 @@ void options_menu(void)
         case 0:
             // Wait for fade to complete
             if ((short)g_fading_state < 0) {
+                if (g_optBonusMode) {       // Mod: the Bonus screen
+                    bonus_open();
+                    s_optMainState = 10;
+                    break;
+                }
                 s_optMainState = 1;
                 s_optPrevButtons = 0;
                 goto stateMainNav;
@@ -3266,6 +3556,10 @@ afterKeyConfig:
                 s_optMainState = 1;
                 s_optNavHold = 6;
             }
+            break;
+
+        case 10:    // Mod: the Bonus screen
+            if (bonus_update()) options_menu_exit();
             break;
 
         case 9:     // Mod: QUIT GAME confirm

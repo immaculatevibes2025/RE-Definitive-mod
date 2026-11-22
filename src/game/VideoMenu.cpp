@@ -58,6 +58,8 @@ static int VideoMenu_SampleKeys(void)
     return keys;
 }
 
+int OptMenu_SampleKeys(void) { return VideoMenu_SampleKeys(); }   // OptionsMenu.cpp (Bonus)
+
 // ============================================================================
 // Resolution list - window client sizes. Built when the menu opens: every
 // preset that fits the monitor's work area, plus the current window size if it
@@ -272,6 +274,23 @@ static void title_controls(void)
     TitleOpt_FadeIn();
 }
 
+
+// Mod: the title's BONUS: Option Mode's screen run as the Bonus page
+// (OptionsMenu.cpp, g_optBonusMode), then back to the title.
+extern int g_optBonusMode;          // OptionsMenu.cpp
+void title_bonus_state(void)
+{
+    TitleOpt_FadeIn();
+    g_optBonusMode = 1;
+    g_optFromTitle = 1;
+    Task_execute(1, (void*)options_menu);
+    Task_sleep(1);
+    g_optFromTitle = 0;
+    g_optBonusMode = 0;
+    TitleOpt_FadeIn();
+    g_main_state_flags = (g_main_state_flags & ~MSF_SCREEN_MODE_MASK) | MSF_SCREEN_STANDALONE;
+    Task_chain((void*)title_state);
+}
 
 // Mod: the title's OPTIONS opens Option Mode directly (GAME PAD / KEYBOARD /
 // VIDEO / SOUND tabs), then returns to the title.

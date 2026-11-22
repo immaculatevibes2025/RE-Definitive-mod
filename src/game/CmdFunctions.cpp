@@ -2,6 +2,7 @@
 // All functions in this file are entries in the script_command_funcs_table[81].
 // Each function takes no parameters and returns int (0 = stop, 1 = continue).
 #include "../Globals.h"
+#include "Bonus.h"                 // Mod: the costume room clears the BONUS outfit
 #include <cstdio>
 #include <cstring>
 #include "../DebugPrint.h"
@@ -3211,6 +3212,19 @@ void FUN_0040c560(int param)
     // g_wardrobeSaturnPending, and the outfit it sets is variant 2. Not in the
     // Director's Cut, which has its own wardrobe and models.
     unsigned char v = (unsigned char)param & 1;
+    // Mod: changing in the costume room (stage 1 room 0x1C) takes over from
+    // the outfit chosen on the title's BONUS screen: the choice goes back to
+    // DEFAULT, so the wardrobe's outfit is the one that loads from now on.
+    {
+        extern int wardrobe_saturn_room(void);   // RoomInit.cpp
+        if (wardrobe_saturn_room()) {
+            const int c = (g_playerEntity.id & 1) ? BONUS_CHAR_JILL : BONUS_CHAR_CHRIS;
+            if (bonus_outfit_get(c) != BONUS_OUTFIT_DEFAULT) {
+                bonus_outfit_set(c, BONUS_OUTFIT_DEFAULT);
+                bonus_save();
+            }
+        }
+    }
     if (g_wardrobeSaturnPending) {
         v = 2;
         g_wardrobeSaturnPending = 0;

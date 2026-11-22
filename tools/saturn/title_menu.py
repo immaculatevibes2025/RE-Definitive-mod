@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build data/t_menu.tim, the scrolling title menu (NEW GAME / LOAD GAME /
-BATTLE GAME / OPTIONS / QUIT GAME) in the PC title's own lettering.
+BATTLE GAME / BONUS / OPTIONS / QUIT GAME) in the PC title's own lettering.
 
 Every word is assembled from the letters of data/t_start.tim's three lines
 (PRESS START BUTTON, NEW GAME, LOAD GAME), as battle_title.py does for BATTLE
@@ -16,6 +16,7 @@ option, lit and unlit, the two copyright lines, and two arrows:
     rows  36- 46  OPTIONS      lit        rows  84- 94  OPTIONS      unlit
     rows  96-104  copyright line 1        rows 108-116  copyright line 2
     rows 120-124  up arrow (x 0-8)        rows 128-132  down arrow (x 0-8)
+    rows 160-170  BONUS        lit        rows 172-182  BONUS        unlit
 
 Lit = colours 1 (face) / 2 (edge), unlit = 2 / 3, as in the original cells.
 Every word is centred on x 128.
@@ -123,6 +124,11 @@ def main():
                       np.zeros((LINE_H, 15), np.uint8), g(new_on, 131, 181)],
                      [2, 2, 2, 0, 0])
 
+    # BONUS: B (BUTTON), O (BUTTON), N (BUTTON), U (BUTTON), S (PRESS).
+    bonus = assemble([g(press, 159, 168), o, g(press, 217, 226), g(press, 171, 180),
+                      g(press, 64, 73)],
+                     [2, 2, 2, 2])
+
     lines = [recentre(new_on), recentre(load_on), battle, options, recentre(quit_)]
 
     # Layout (5 lines): lit at k*12, unlit at 60 + k*12, copyright 120 / 132,
@@ -140,6 +146,11 @@ def main():
         up[r, 4 - r:4 + r + 1] = 2
     out[144:149, 0:9] = up
     out[152:157, 0:9] = up[::-1]
+
+    # BONUS, added after the rest so older layouts stay where they were:
+    # lit at 160, unlit at 172.
+    out[160:160 + LINE_H] = bonus
+    out[172:172 + LINE_H] = dim(bonus)
 
     write_tim(dst, clut, out)
     print("wrote", dst)

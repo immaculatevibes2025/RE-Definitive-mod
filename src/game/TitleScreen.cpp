@@ -25,14 +25,30 @@ static int s_titleBattle = 0;     // 1 = BATTLE GAME is offered this visit
 // Without the sheet the title falls back to the fixed two/three-line cells.
 static int s_titleMenu = 0;       // 1 = the scrolling menu sheet is loaded
 static int s_dcSub = 0;           // DC: the difficulty submenu is up (its sheet now owns slot 13)
-static int s_titleItems[5];       // actions, in list order
+static int s_titleItems[6];       // actions, in list order
 static int s_titleItemCount = 0;
 static int s_titleScroll = 0;     // first visible list index
 #define TITLE_MENU_VISIBLE 3
 #define TITLE_ACTION_OPTIONS 4
 #define TITLE_ACTION_QUIT    5   // Mod: closes the game
+#define TITLE_ACTION_BONUS   6   // Mod: the Bonus screen (costumes, bonus weapons)
 
 extern void title_options_state(void);   // VideoMenu.cpp: the OPTIONS screen
+extern void title_bonus_state(void);     // VideoMenu.cpp: the BONUS screen
+
+// t_menu.tim from a title_menu.py that has the BONUS line (rows 160-182):
+// an older sheet leaves them empty, and the title then does without BONUS.
+static int title_sheet_has_bonus(const unsigned char* tim)
+{
+    const unsigned int clutLen = *(const unsigned int*)(tim + 8);
+    const unsigned char* pix = tim + 8 + clutLen + 12;      // 256 x 256 4bpp
+    for (int y = 160; y < 171; y++) {
+        for (int x = 0; x < 128; x++) {
+            if (pix[y * 128 + x] != 0) return 1;
+        }
+    }
+    return 0;
+}
 
 static int title_menu_index(int action)
 {
@@ -79,7 +95,9 @@ static void title_menu_draw(unsigned char brightness, int selectedAction)
     for (int r = 0; r < TITLE_MENU_VISIBLE && s_titleScroll + r < s_titleItemCount; r++) {
         const int idx = s_titleScroll + r;
         const int line = s_titleItems[idx] - 1;          // sheet line 0..4
-        const int texV = (idx == sel ? 0 : 60) + line * 12;
+        const int texV = (s_titleItems[idx] == TITLE_ACTION_BONUS)
+                             ? (idx == sel ? 160 : 172)      // BONUS (title_menu.py)
+                             : (idx == sel ? 0 : 60) + line * 12;
         title_menu_strip(0, texV, 256, 11, -130, 41 + r * 18, brightness);
     }
     title_menu_strip(0, 120, 256, 9, -130, 99, brightness);
@@ -341,12 +359,14 @@ void init_title_screen(void)
         // difficulty sheet is put back in slot 13 when NEW GAME opens it.
         const int battle = battle_title_option_available();
         if (LoadFile(GAME_DATA_ROOT "data\\t_menu.tim", g_TimImageBuffer__bitmap, 0x20) != (size_t)-1) {
+            const int bonus = title_sheet_has_bonus((const unsigned char*)g_TimImageBuffer__bitmap);
             LoadTexturePage(g_TimImageBuffer__bitmap, TITLE_BATTLE_BANK, 0, 13, 0, 0, 0, 0);
             s_titleMenu = 1;
             s_titleBattle = battle;
             s_titleItems[s_titleItemCount++] = 1;
             s_titleItems[s_titleItemCount++] = 2;
             if (battle) s_titleItems[s_titleItemCount++] = 3;
+            if (bonus) s_titleItems[s_titleItemCount++] = TITLE_ACTION_BONUS;
             s_titleItems[s_titleItemCount++] = TITLE_ACTION_OPTIONS;
             s_titleItems[s_titleItemCount++] = TITLE_ACTION_QUIT;
         } else if (battle && !g_bDcMode &&
@@ -477,7 +497,7 @@ void UpdateTitleTextSprite(unsigned char brightness, unsigned char selectionId)
     }
 
     // Mod: the scrolling menu draws the whole list itself.
-    if (s_titleMenu && !s_dcSub && selectionId >= 1 && selectionId <= TITLE_ACTION_QUIT) {
+    if (s_titleMenu && !s_dcSub && selectionId >= 1 && selectionId <= TITLE_ACTION_BONUS) {
         title_menu_draw(brightness, selectionId);
         return;
     }
@@ -661,8 +681,9 @@ void update_title_options(void)
 				CleanupVideoConfigAndSaveAllSettings();
 				plat_exit(0);
 			}
-			// Mod: no "Resident Evil" call for OPTIONS.
-			if (!(s_titleMenu && g_titleSelectionId == TITLE_ACTION_OPTIONS)) {
+			// Mod: no "Resident Evil" call for OPTIONS or BONUS.
+			if (!(s_titleMenu && (g_titleSelectionId == TITLE_ACTION_OPTIONS ||
+			                      g_titleSelectionId == TITLE_ACTION_BONUS))) {
 				play_sfx(SFX_BANKS, SFX_TITLE_EVIL01);
 				play_sfx(SFX_BANKS, 1); // null sfx
 			}
@@ -932,6 +953,11 @@ void title_state(void)
         if (g_titleSelectionId == TITLE_ACTION_OPTIONS) {
             nullsub_0047eb80();
             Task_chain((void*)title_options_state);
+            return;
+        }
+        if (g_titleSelectionId == TITLE_ACTION_BONUS) {
+            nullsub_0047eb80();
+            Task_chain((void*)title_bonus_state);
             return;
         }
         if (g_titleSelectionId == TITLE_ACTION_QUIT) {

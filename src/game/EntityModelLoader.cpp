@@ -743,10 +743,9 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
     // which must not pick up a costume flag an earlier game left set.
     BonusModel bonusModel = { -1, "" };
     const int isPlayerLoad = ((void*)em == (void*)&g_playerEntity) && entity_id < 4;
-    // Definitive Mod: outfits come from the wardrobe only. The OPTIONS > BONUS
-    // page that chose these is not in this build, so a bonus.dat left by a
-    // stock decomp build must not override the wardrobe's choice.
-    const int bonusOutfit = 0;
+    // The outfit chosen on the title's BONUS screen (Bonus.cpp); the costume
+    // room clears it when it changes the outfit (CmdFunctions.cpp FUN_0040c560).
+    const int bonusOutfit = isPlayerLoad && bonus_player_model(entity_id, &bonusModel);
     const int plainPlayer = bonusOutfit || (isPlayerLoad && bonus_preview_active());
 
     // The same choice dresses the cutscene NPC of that character, as the DC's
@@ -754,7 +753,7 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
     // the cutscene animations - and the outfit's mesh and texture replace its
     // own afterwards (LoadNpcOutfit), so the DC's remap is not taken for it.
     BonusModel npcOutfitModel = { -1, "" };
-    const int npcOutfit = 0;   // as above
+    const int npcOutfit = !isPlayerLoad && bonus_npc_model(entity_id, &npcOutfitModel);
 
     // Mod: g_bCostumeVariant 2 = the Saturn outfit, loaded from its own file
     // below; it uses the second outfit's table slot for everything else.

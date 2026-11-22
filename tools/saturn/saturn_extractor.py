@@ -213,6 +213,10 @@ def run(disc_path, game, log):
             if path:
                 tool("Building the Option Mode tabs..." if src == "JOPT06.TIM" else "",
                      "option_tabs.py", path, os.path.join(data, dst))
+        jopt = find_ci(data, "JOPT06.TIM")
+        if jopt:
+            tool("Building the Bonus screen...", "option_tabs.py", jopt,
+                 os.path.join(data, "Bonus06m.tim"), "--bonus")
         log("\nDone! Start the game and turn the extras on in Option Mode or config.ini.")
     finally:
         shutil.rmtree(work, ignore_errors=True)

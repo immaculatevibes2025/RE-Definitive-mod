@@ -6,7 +6,11 @@ a wide "SideWinder game pad" bar over JOY PAD | KEYBOARD | EXIT. This splits
 the bar into two buttons, VIDEO | SOUND, and relabels JOY PAD as GAME PAD,
 in the art's own 3x7 lettering. KEYBOARD and EXIT are left as they are.
 
-Usage:  python3 option_tabs.py <in.tim> <out.tim>
+With --bonus it builds the title
+screen's Bonus page instead (Bonus06m.tim from JOPT06.TIM): title BONUS,
+rows EXIT / CHRIS / JILL / REBECCA / WEAPONS.
+
+Usage:  python3 option_tabs.py <in.tim> <out.tim> [--bonus]
 Needs numpy.
 """
 import sys
@@ -33,8 +37,13 @@ G = {
     'S': ["###", "#..", "#..", "###", "..#", "..#", "###"],
     'U': ["#.#", "#.#", "#.#", "#.#", "#.#", "#.#", "###"],
     'V': ["#.#", "#.#", "#.#", "#.#", "#.#", "#.#", ".#."],
+    'C': ["###", "#..", "#..", "#..", "#..", "#..", "###"],
+    'H': ["#.#", "#.#", "#.#", "###", "#.#", "#.#", "#.#"],
+    'J': ["..#", "..#", "..#", "..#", "..#", "#.#", "###"],
+    'W': ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
 }
 INK = (7, 11, 12)          # the art's lettering colour (5-bit RGB)
+BONUS = False              # --bonus: the title's Bonus screen (BONUS, character rows)
 
 
 def word(text, gap):
@@ -49,7 +58,9 @@ def word(text, gap):
 
 
 def main():
+    global BONUS
     src, dst = sys.argv[1], sys.argv[2]
+    BONUS = len(sys.argv) > 3 and sys.argv[3] == "--bonus"
     d = bytearray(open(src, 'rb').read())
     px = np.frombuffer(bytes(d[20:20 + 320 * 240 * 2]), '<u2').reshape(240, 320).copy()
     orig = px.copy()
@@ -95,21 +106,50 @@ def main():
     centred("GAMEPLAY", 1, 69, 3)
     px = tmp
 
-    # --- Title: OPTION MODE -> OPTION ---
-    # Erase " MODE" (fill from the rows above and below), then an S after
-    # the N: the E's top half over a mirrored E's bottom half.
-    e = px[11:25, 115:125].copy()
-    s = np.concatenate([e[:8], e[8:, ::-1]], 0)
-    for x in range(75, 128):
-        a, z = int(px[10, x]), int(px[25, x])
-        for y in range(11, 25):
-            t = (y - 10) / 15.0
-            v = 0
-            for c in range(3):
-                ca = (a >> (5 * c)) & 31; cz = (z >> (5 * c)) & 31
-                v |= int(round(ca + (cz - ca) * t)) << (5 * c)
-            px[y, x] = v
-    # (No S: the title reads OPTION.)
+    # --- Title: OPTION MODE as it is; BONUS for the Bonus screen ---
+    # The original's own letters, as rectangles (rows 11-24): O P T I O N
+    # and M O D E. E N U are made from them: N is OPTION's N, U is an O with
+    # its straight sides carried up over the top, and for BONUS, B is a P
+    # with its bowl repeated below and S is an E's top half over a mirrored
+    # E's bottom half (squared, like the rest of the lettering).
+    T0, T1 = 11, 25
+    L = {
+        'O': orig[T0:T1, 13:24], 'P': orig[T0:T1, 23:34], 'N': orig[T0:T1, 63:74],
+        'M': orig[T0:T1, 80:95], 'E': orig[T0:T1, 117:127],
+    }
+    u = L['O'].copy()
+    u[0:8] = u[8]                                   # open the top: sides up
+    L['U'] = u
+    e = L['E']
+    L['S'] = np.concatenate([e[:8], e[8:, ::-1]], 0)
+    b = L['P'].copy()
+    b[7:13] = L['P'][1:7]                           # the bowl again, lower
+    b[13] = L['P'][7]
+    L['B'] = b
+
+    def erase(x0, x1):
+        # fill from the rows above and below, blended down the height
+        for x in range(x0, x1):
+            a, z = int(px[T0 - 1, x]), int(px[T1, x])
+            for y in range(T0, T1):
+                t = (y - T0 + 1) / float(T1 - T0 + 1)
+                v = 0
+                for c in range(3):
+                    ca = (a >> (5 * c)) & 31; cz = (z >> (5 * c)) & 31
+                    v |= int(round(ca + (cz - ca) * t)) << (5 * c)
+                px[y, x] = v
+
+    def letters(text, x):
+        for ch in text:
+            g = L[ch]
+            px[T0:T1, x:x + g.shape[1]] = g
+            x += g.shape[1] + 1
+        return x
+
+    if BONUS:
+        erase(10, 130)
+        letters("BONUS", 13)
+    # (Option Mode keeps the original title, OPTION MODE.)
 
     # --- Re-stack the left column (x < 135): the title, then five tab rows
     # (EXIT / VIDEO | SOUND / GAME PAD | KEYBOARD / GAMEPLAY / QUIT GAME),
@@ -140,8 +180,12 @@ def main():
             put(right, 99)
         return b
 
-    rows = [tab_row("EXIT"), tab_row("VIDEO", "SOUND"), tab_row("GAME PAD", "KEYBOARD"),
-            tab_row("GAMEPLAY"), tab_row("QUIT GAME")]
+    if BONUS:
+        rows = [tab_row("EXIT"), tab_row("CHRIS"), tab_row("JILL"),
+                tab_row("REBECCA"), tab_row("WEAPONS")]
+    else:
+        rows = [tab_row("EXIT"), tab_row("VIDEO", "SOUND"), tab_row("GAME PAD", "KEYBOARD"),
+                tab_row("GAMEPLAY"), tab_row("QUIT GAME")]
     new = np.concatenate([old[2:3], old[11:26], orig[29:30, :W]] + rows +
                          [orig[58:59, :W], old[59:62], old[62:120], old[126:227]], 0)
     assert new.shape[0] == 240, new.shape
