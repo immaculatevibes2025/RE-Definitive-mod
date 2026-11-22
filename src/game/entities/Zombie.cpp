@@ -409,6 +409,13 @@ void zombie_init(void)
         ENTITY->health = health_base - health_variance;
     }
 
+    // Saturn: behaviour 9 - the Battle Game's Zombie Wesker, the only zombie
+    // that carries it - doubles the roll (GAME5 0x0605E964-0x0605E974:
+    // `(+2 & 0xF) == 9` -> `hp += hp`), before the behaviour-5 test below.
+    if (g_bSaturnMode && (ENTITY->behavior_flags & 0x0F) == ZOMBIE_BEH_SATURN_WESKER) {
+        ENTITY->health = (short)(ENTITY->health * 2);
+    }
+
     // 0x00433680-0x004336a3: Laying down eating check
     if ((ENTITY->behavior_flags & 0xF) == ZOMBIE_BEH_5) {
         ENTITY->action_state = 2;
@@ -646,7 +653,6 @@ extern void BillboardSetColor(void* quad, int unused1, int unused2, unsigned int
 
 // Shared scratch globals defined in EntityCommon.cpp
 extern unsigned int g_entity_bkp;
-extern void* _ENTITY_SAVE;
 extern int g_scaled_down_dist;
 extern int player_distance_z;
 
@@ -1465,6 +1471,14 @@ static const unsigned char zombie_damage_hard_tbl[16] = {
     12, 0, 0, 0, 0, 0, 0, 0
 };
 
+// Saturn (GAME5 0x0609F3F8, its only zombie damage table, read by the bite at
+// 0x0606061A with no scenario-flag test): the PC's hard row, and behaviour 9 -
+// Zombie Wesker - bites for 12 too instead of never attacking.
+static const unsigned char zombie_damage_saturn_tbl[16] = {
+    12, 12, 9, 9, 12, 12, 12, 12,
+    12, 12, 0, 0, 0, 0, 0, 0
+};
+
 // ---------------------------------------------------------------------------
 // player_death_animations_tbl @ 0x004bb3b8 - indexed by attacking_direction.
 // Each entry tints a pair of the player's joints (the death wound) after the
@@ -1698,7 +1712,9 @@ void zombie_attack(void)
             ENTITY->action_ticks_counter = (unsigned short)(tick + 1);
             if (tick % 19 == 0) {
                 unsigned char damage;
-                if (Flg_ck((int)g_ScenarioFlags, SCENARIO_FLAG_SECOND_PLAYTHROUGH) == 0)
+                if (g_bSaturnMode)
+                    damage = zombie_damage_saturn_tbl[ENTITY->behavior_flags & 0x0F];
+                else if (Flg_ck((int)g_ScenarioFlags, SCENARIO_FLAG_SECOND_PLAYTHROUGH) == 0)
                     damage = zombie_damage_normal_tbl[ENTITY->behavior_flags & 0x0F];
                 else
                     damage = zombie_damage_hard_tbl[ENTITY->behavior_flags & 0x0F];
@@ -2072,6 +2088,15 @@ static void dc_standup_lunge(void)
 // run under (STAGE9 folds onto stage 1 and STAGEE onto stage 6), which is
 // exactly where the id 0x16 + behaviour 0xB records live.
 // ============================================================================
+// Saturn: behaviour 9 is the chase (GAME5's zombie table 0x0609F30C, whose
+// behaviour view starts at [9]: [18] = 0x0605EEA4, the same handler as
+// behaviours 0 and 1). The PC leaves it NULL. Written both ways, so a session
+// that is not Saturn gets the PC's NULL back.
+void saturn_apply_zombie_tables(void)
+{
+    zombie_states_table[19] = g_bSaturnMode ? (void*)zombie_chase_player : NULL;
+}
+
 void dc_apply_zombie_tables(void)
 {
     if (!g_bDcMode) {
@@ -2842,12 +2867,14 @@ static void benddown_and_eat(void)
             Snd_em(3);
         }
         if (ENTITY->animation_frame_id == 0x0E) {
-            _ENTITY_SAVE = &g_playerEntityPointer;
+            Entity* zombie = ENTITY;
+            ENTITY = (Entity*)&g_playerEntityPointer;
             JointApplyColorTint(g_playerEntityPointer.jointsStructs, 0x30, 0x80820, &DAT_00606060);
             VECTOR pos = { 100, -700, 0, 0 };
             Effect_CreateBillboard(0, 0, 0, &g_playerEntityPointer.jointsStructs->world, &pos, 0);
             JointApplyColorTint(g_playerEntityPointer.jointsStructs + 2, 0x30, 0x80820, &DAT_00606060);
             Effect_CreateBillboard(0, 0, 0, &g_playerEntityPointer.jointsStructs[2].world, &pos, 0);
+            ENTITY = zombie;
         }
         // `sVar1 = *0xc4; *0xc4 = sVar1 - 1; if (sVar1 == 0)` - the test is
         // on the value BEFORE the decrement, so it fires one frame later

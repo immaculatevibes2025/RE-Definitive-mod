@@ -73,10 +73,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 // Window activated
                 g_bWindowFocused = TRUE;
                 ResumePausedSounds();
-                // Mod: coming back - restore and take the top-most band again.
+                // Mod: coming back - restore and come to the front (HWND_TOP,
+                // not topmost: upstream's alt-tab fix).
                 if (g_bFullScreen) {
                     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
             }

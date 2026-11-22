@@ -11,7 +11,9 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
+#include <stdio.h>    // _snprintf_s for plat_dir_list
 #include <stdlib.h>   // malloc/free for plat_file_read_all
+#include <string.h>
 
 // Cached system wave-out volume, owned by Globals.cpp. Declared here rather
 // than pulled in through Globals.h: that header redefines OutputDebugStringA
@@ -153,6 +155,21 @@ BOOL plat_mkdir(const char* path)
     return (GetLastError() == ERROR_ALREADY_EXISTS) ? TRUE : FALSE;
 }
 
+BOOL plat_dir_list(const char* path, PlatDirVisit visit, void* user)
+{
+    char pattern[MAX_PATH];
+    if (_snprintf_s(pattern, sizeof(pattern), _TRUNCATE, "%s\\*", path) < 0) return FALSE;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        visit(fd.cFileName, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? TRUE : FALSE, user);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return TRUE;
+}
+
 BOOL plat_file_write(const char* path, const void* data, size_t size)
 {
     HANDLE hFile = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
@@ -163,6 +180,17 @@ BOOL plat_file_write(const char* path, const void* data, size_t size)
     BOOL ok = WriteFile(hFile, data, (DWORD)size, &written, NULL);
     CloseHandle(hFile);
     return (ok && written == (DWORD)size) ? TRUE : FALSE;
+}
+
+unsigned int plat_file_mtime(const char* path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &info)) return 0;
+    unsigned long long ft = ((unsigned long long)info.ftLastWriteTime.dwHighDateTime << 32)
+                          | info.ftLastWriteTime.dwLowDateTime;
+    const unsigned long long epoch = 116444736000000000ULL;   // 1601 -> 1970, 100 ns units
+    if (ft < epoch) return 0;
+    return (unsigned int)((ft - epoch) / 10000000ULL);
 }
 
 size_t plat_readable_bytes(const void* p)
@@ -339,7 +367,8 @@ void plat_cursor_show(BOOL show)
 // The styles are CreateGameWindow's (main.cpp, 0x00441bd1/0x00441bda), so a
 // window switched here is the window the game would have created in that mode:
 //   windowed   WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, WS_EX_APPWINDOW
-//   fullscreen WS_POPUP | WS_CLIPCHILDREN,              WS_EX_TOPMOST
+//   fullscreen WS_POPUP | WS_CLIPCHILDREN,              WS_EX_APPWINDOW
+// (not topmost - upstream's alt-tab fix, see CreateGameWindow)
 // SetWindowPos delivers WM_SIZE synchronously, and the Marni WM_SIZE path
 // (MarniSystem.cpp VTable_HandleWindowMessage -> MarniDX::HandleWindowMessage)
 // resizes the swap chain to the new client area.
@@ -349,7 +378,7 @@ extern HWND g_hWnd;   // 0x00bcb2c0 (Globals.h)
 static const DWORD kWindowedStyle   = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 static const DWORD kWindowedExStyle = WS_EX_APPWINDOW;
 static const DWORD kFullStyle       = WS_POPUP | WS_CLIPCHILDREN;
-static const DWORD kFullExStyle     = WS_EX_TOPMOST;
+static const DWORD kFullExStyle     = WS_EX_APPWINDOW;
 
 static BOOL plat_monitor_info(MONITORINFO* mi)
 {
@@ -398,7 +427,7 @@ void plat_apply_video_mode(DWORD width, DWORD height, BOOL fullScreen)
     if (fullScreen) {
         SetWindowLongA(g_hWnd, GWL_STYLE, (LONG)(kFullStyle | WS_VISIBLE));
         SetWindowLongA(g_hWnd, GWL_EXSTYLE, (LONG)kFullExStyle);
-        SetWindowPos(g_hWnd, HWND_TOPMOST,
+        SetWindowPos(g_hWnd, HWND_NOTOPMOST,
                      mi.rcMonitor.left, mi.rcMonitor.top,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,

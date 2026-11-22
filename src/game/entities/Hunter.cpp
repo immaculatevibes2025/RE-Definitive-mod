@@ -75,6 +75,7 @@
 #include "EntityCommon.h"
 #include "../../Globals.h"
 #include "../BioCard.h"
+#include "../saturn/SaturnTick.h"   // the Saturn's Tick: GAME2's own Hunter body
 #include <cstdlib>
 #include <cstring>
 
@@ -87,8 +88,8 @@ extern void zombie_check_special_weapon(void);                     // 0x0043d8a0
 
 // 0x004bd2b0 - shared one-shot flag, defined in Globals.cpp. The pounce grab
 // sets it to 1 (hunter_pounce_track); the death screen consumes and clears it
-// while hiding the player's head joint. Image value 0x00006C6C.
-extern int DAT_004bd2b0;                                           // 0x004bd2b0
+// while hiding the player's head joint.
+extern int g_dieScreenHideHead;                                    // 0x004bd2b0
 
 // 0x00be0de4 / 0x00be0de8 - shared entity scratch, defined in EntityCommon.cpp.
 extern int player_distance_z;                                      // 0x00be0de4
@@ -173,6 +174,27 @@ const unsigned char hunter_pounce_chance_mid[16] = {
 // (0 = Jill at 105, 1 = Chris at 72 - Chris must be hurt worse first).
 // ============================================================================
 const unsigned char hunter_player_health_gate[2] = { 105, 72 };
+
+// Port: the gate is per release. 105 / 72 is the PC's and the Japanese
+// Saturn's (GAME1/2/5). The PS1 USA overlays (STAGE3/6/7), the USA Saturn
+// (GAME1 0x6ebdc, GAME2 0x7090c, GAME5 0x74758) and the Director's Cut keep
+// {98, 67}; the DC's Hunter init (STAGE3 0x80112be0, STAGE6 0x80119cb0,
+// STAGE7 0x801150bc) rewrites it to {75, 52} when g_status_flags & 0x20000
+// (ADVANCED and ADVANCED*).
+static const unsigned char hunter_player_health_gate_western[2]  = { 98, 67 };
+static const unsigned char hunter_player_health_gate_advanced[2] = { 75, 52 };
+
+static unsigned short hunter_pounce_health_gate(void)
+{
+    const int character = g_playerEntity.id & 1;
+    if (g_bDcMode && (g_main_state_flags2 & MSF2_DC_ADVANCED) != 0) {
+        return hunter_player_health_gate_advanced[character];
+    }
+    if (g_bDcMode || western_difficulty()) {
+        return hunter_player_health_gate_western[character];
+    }
+    return hunter_player_health_gate[character];
+}
 
 // ============================================================================
 // hunter_behavior_seed_tbl @ 0x004b488f - the initial behaviour roll when the
@@ -484,6 +506,9 @@ static void hunter_state_init(void) // 0x00416020
         ENTITY->ignore_player_flag = 1;
         ENTITY->action_behavior = 0xB;
     }
+
+    // Sega Saturn, stage byte 2: the Hunter is a Tick (GAME2 0x0606C824).
+    if (g_bSaturnMode && saturn_tick_active()) saturn_tick_state_init();
 }
 
 // ============================================================================
@@ -645,6 +670,10 @@ static void hunter_variant_dispatch(void) // 0x004167f0
         hunter_coward_ai();
         return;
     }
+    // Sega Saturn, Tick: a player flag of 0x55 parks it (GAME2 0x0606D074).
+    if (g_bSaturnMode && saturn_tick_active() && saturn_tick_variant_hold()) {
+        return;
+    }
     hunter_variant_table[ENTITY->behavior_flags & 0xF]();
 }
 
@@ -727,10 +756,14 @@ static void hunter_variant_0_ai(void) // 0x00416840
         int dz = PLAYER_T_INT[2] - H_POS_T[2];
         int dx = PLAYER_T_INT[0] - H_POS_T[0];
         g_playerDisplacement = (dz < 0 ? -dz : dz) + (dx < 0 ? -dx : dx);
+        // Sega Saturn, Tick (GAME2 0x0606D10C): aims within 0x20 rather than
+        // 0x100 and starts the stab instead of rolling a leap.
+        const bool tick = g_bSaturnMode && saturn_tick_active();
         if (g_playerDisplacement < 2000 &&
-            (short)turn_toward_target(PLAYER_T, 0x100) == 0 &&
+            (short)turn_toward_target(PLAYER_T, tick ? 0x20 : 0x100) == 0 &&
             H_POUNCE_LATCH != 0) {
-            hunter_roll_leap();
+            if (tick) saturn_tick_variant_0_leap();
+            else      hunter_roll_leap();
         }
     }
 }
@@ -785,6 +818,11 @@ static void tick_variant_2_ai(void);            // mod: Saturn GAME2.PRG 0x0606d
 
 static void hunter_variant_2_ai(void) // 0x00416ca0
 {
+    // Sega Saturn, Tick: GAME2 carries its own variant 2 (0x0606D484).
+    if (g_bSaturnMode && saturn_tick_active()) {
+        saturn_tick_variant_2_ai();
+        return;
+    }
     if (mod_ticks_active()) {
         tick_variant_2_ai();
         return;
@@ -798,7 +836,7 @@ static void hunter_variant_2_ai(void) // 0x00416ca0
     H_POUNCE_LATCH = 0;
 
     if ((unsigned short)playerHealth <
-        (unsigned short)hunter_player_health_gate[g_playerEntity.id & 1] &&
+        hunter_pounce_health_gate() &&
         0 < playerHealth) {
         H_POISE = 0;
         if (H_HEALTH < 0x28) {
@@ -1171,6 +1209,11 @@ static void hunter_idle_walk(void) // 0x00417210
 // ============================================================================
 static void hunter_behavior_chase(void) // 0x00417290
 {
+    // Sega Saturn, Tick: its own walk (GAME2 0x0606D998).
+    if (g_bSaturnMode && saturn_tick_active()) {
+        saturn_tick_behavior_chase();
+        return;
+    }
     ENTITY->animationId = 0x10;
     H_SPEED_W = 0x28;
     g_animFrameIdSave = 6;
@@ -1479,7 +1522,7 @@ static void tick_grab(void)
         return;
     }
     case 2: { // pull in: the arm shortens, dragging the player with the claw
-        DAT_004bd2b0 = 1;
+        g_dieScreenHideHead = 1;
         if (a) {
             int k = a->k256 - (a->k256 - 256) / (H_TICKS > 0 ? H_TICKS : 1);
             tick_arm_set(a, k);
@@ -1543,7 +1586,7 @@ static void tick_grab(void)
         // through the neck to the left, then a short hold and the roar.
         const int WIND = 5, SWEEP = 11, HOLD = 10;
         int t = H_TICKS++;
-        DAT_004bd2b0 = 1;
+        g_dieScreenHideHead = 1;
         double yaw;
         if (t < WIND)              yaw = 85.0 * t / WIND;
         else if (t < WIND + SWEEP) yaw = 85.0 - 150.0 * (t - WIND) / SWEEP;
@@ -1597,6 +1640,11 @@ static void tick_grab(void)
 
 static void hunter_behavior_pounce(void) // 0x00417760
 {
+    // Sega Saturn, Tick: behaviour 5 is the stab (GAME2 0x0606DE98).
+    if (g_bSaturnMode && saturn_tick_active()) {
+        saturn_tick_behavior_pounce();
+        return;
+    }
     H_POUNCE_LATCH = 0;
     if (mod_ticks_active() && (ENTITY->behavior_flags & 0x40) == 0) {
         tick_grab();
@@ -1846,7 +1894,10 @@ static void hunter_pounce_track(void) // 0x00417a20
 {
     ENTITY->action_state = (unsigned char)(ENTITY->action_state +
         (char)Joint_move(0, ENTITY->animHeader, ENTITY->animBase, 0x400));
-    DAT_004bd2b0 = 1;
+    // The PS1 hides the head right here (joint 1 flags &= 0xFE, STAGE3.EXE
+    // 0x801174fc); the PC leaves it drawn and defers the hide to the death
+    // screen through this flag.
+    g_dieScreenHideHead = 1;
     hunter_track_player_joint();
 }
 
@@ -2029,6 +2080,12 @@ static bool tick_burst_head_if_dead(void)
 
 static void hunter_behavior_grabhold(void) // 0x00417ee0
 {
+    // Sega Saturn, Tick: it carries the player on its arm and decapitates them
+    // (GAME2 0x0606E78C); the Hunter's hold would index a Tick animation id.
+    if (g_bSaturnMode && saturn_tick_active()) {
+        saturn_tick_behavior_grabhold();
+        return;
+    }
     switch (ENTITY->action_state) {
     case 0:
         ENTITY->action_state = 1;

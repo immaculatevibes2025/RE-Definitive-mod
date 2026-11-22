@@ -1,12 +1,13 @@
 #include "PcAssetsTab.h"
 
+#include "BackgroundFormatRow.h"
+#include "FfmpegRow.h"
 #include "RunPanel.h"
 #include "Worker.h"
 #include "core/Migrate.h"
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -15,7 +16,6 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QStandardPaths>
 #include <QVBoxLayout>
 
 namespace {
@@ -49,18 +49,17 @@ protected:
 
 }  // namespace
 
-PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
+PcAssetsTab::PcAssetsTab(QLineEdit* target, BackgroundFormatRow* backgrounds,
+                         FfmpegRow* ffmpeg, QWidget* parent)
+    : QWidget(parent), m_target(target), m_backgrounds(backgrounds),
+      m_ffmpeg(ffmpeg) {
     m_sourceKind = new QComboBox(this);
-    m_sourceKind->addItem(tr("Folder (already extracted)"), false);
+    m_sourceKind->addItem(tr("Folder (already extracted or GOG version)"), false);
     m_sourceKind->addItem(tr("Disc image (.iso / .bin / .cue)"), true);
 
     m_source = new QLineEdit(this);
     auto* browseSource = new QPushButton(tr("Browse..."), this);
 
-    m_target = new QLineEdit(this);
-    m_target->setText(QCoreApplication::applicationDirPath() +
-                      QStringLiteral("/Resident Evil Definitive"));
-    auto* browseTarget = new QPushButton(tr("Browse..."), this);
 
     m_version = new QComboBox(this);
     m_version->addItem(tr("USA (North American / GOG)"), (int)re1::AssetVersion::USA);
@@ -69,19 +68,6 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
     m_convert = new QCheckBox(tr("Convert movies (AVI -> MP4)"), this);
     m_keepAvi = new QCheckBox(tr("Keep the original .avi next to the .mp4"), this);
     m_keepAvi->setChecked(true);
-
-    m_ffmpeg = new QLineEdit(this);
-    m_ffmpeg->setText(QStringLiteral("ffmpeg"));
-    auto* browseFfmpeg = new QPushButton(tr("Browse..."), this);
-    auto* detectFfmpeg = new QPushButton(tr("Detect"), this);
-    auto* ffmpegRow = new QWidget();
-    {
-        auto* l = new QHBoxLayout(ffmpegRow);
-        l->setContentsMargins(0, 0, 0, 0);
-        l->addWidget(m_ffmpeg, 1);
-        l->addWidget(browseFfmpeg);
-        l->addWidget(detectFfmpeg);
-    }
 
     m_ps1 = new QGroupBox(tr("Add PS1 assets from a PS1 disc image"), this);
     m_ps1->setCheckable(true);
@@ -118,7 +104,7 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
     m_ps1AudioBgm->setChecked(true);
     {
         auto* ps1Form = new QFormLayout(m_ps1);
-        ps1Form->addRow(tr("PS1 disc:"), pathRow(m_ps1Image, browsePs1));
+        ps1Form->addRow(tr("PS1 image:"), pathRow(m_ps1Image, browsePs1));
         ps1Form->addRow(QString(), m_ps1Credits);
         ps1Form->addRow(QString(), m_ps1Subs);
         ps1Form->addRow(QString(), m_ps1Movies);
@@ -154,12 +140,10 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
 
     auto* form = new QFormLayout();
     form->addRow(tr("Source type:"), m_sourceKind);
-    form->addRow(tr("Resident Evil PC files:"), pathRow(m_source, browseSource));
-    form->addRow(tr("Output folder:"), pathRow(m_target, browseTarget));
+    form->addRow(tr("Source:"), pathRow(m_source, browseSource));
     form->addRow(tr("Asset type:"), m_version);
     form->addRow(QString(), m_convert);
     form->addRow(QString(), m_keepAvi);
-    form->addRow(tr("ffmpeg:"), ffmpegRow);
 
     m_run = new RunPanel(this);
 
@@ -184,9 +168,6 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
     connect(m_ps1Audio, &QCheckBox::toggled, this, &PcAssetsTab::syncEnabled);
     connect(m_ps1AudioFormat, &QComboBox::currentIndexChanged, this,
             &PcAssetsTab::syncEnabled);
-    connect(browseTarget, &QPushButton::clicked, this, &PcAssetsTab::onBrowseTarget);
-    connect(browseFfmpeg, &QPushButton::clicked, this, &PcAssetsTab::onBrowseFfmpeg);
-    connect(detectFfmpeg, &QPushButton::clicked, this, &PcAssetsTab::onDetectFfmpeg);
     connect(m_convert, &QCheckBox::toggled, this, &PcAssetsTab::syncEnabled);
 
     m_run->setTaskFactory([this]() -> Worker* {
@@ -198,7 +179,9 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
             (re1::AssetVersion)m_version->currentData().toInt();
         opts.convertMovies = m_convert->isChecked();
         opts.keepAvi = m_keepAvi->isChecked();
-        opts.ffmpegPath = m_ffmpeg->text().toStdString();
+        opts.ffmpegPath = m_ffmpeg->path();
+        opts.backgroundFormat = m_backgrounds->format();
+        opts.webpQuality = m_backgrounds->quality();
         if (m_ps1->isChecked()) {
             opts.ps1ImagePath = m_ps1Image->text().toStdString();
             opts.ps1Credits = m_ps1Credits->isChecked();
@@ -225,12 +208,9 @@ PcAssetsTab::PcAssetsTab(QWidget* parent) : QWidget(parent) {
 }
 
 void PcAssetsTab::syncEnabled() {
-    const bool ps1Movies = m_ps1->isChecked() && m_ps1Movies->isChecked();
     const bool audio = m_ps1Audio->isChecked();
     const bool ogg = audio && m_ps1AudioFormat->currentData().toBool();
     m_keepAvi->setEnabled(m_convert->isChecked());
-    m_ffmpeg->setEnabled(m_convert->isChecked() || ps1Movies ||
-                         (m_ps1->isChecked() && ogg));
     m_ps1Replace->setEnabled(m_ps1Movies->isChecked());
     m_ps1AudioSfx->setEnabled(audio);
     m_ps1AudioVoices->setEnabled(audio);
@@ -262,27 +242,4 @@ void PcAssetsTab::onBrowsePs1() {
         this, tr("Select a PS1 disc image"), m_ps1Image->text(),
         tr("Disc images (*.cue *.bin *.img *.iso);;All files (*)"));
     if (!f.isEmpty()) m_ps1Image->setText(f);
-}
-
-void PcAssetsTab::onBrowseTarget() {
-    const QString d = QFileDialog::getExistingDirectory(
-        this, tr("Select the output folder"), m_target->text());
-    if (!d.isEmpty()) m_target->setText(d);
-}
-
-void PcAssetsTab::onBrowseFfmpeg() {
-    const QString f = QFileDialog::getOpenFileName(
-        this, tr("Select ffmpeg"), m_ffmpeg->text(),
-        tr("ffmpeg (ffmpeg*.exe);;All files (*)"));
-    if (!f.isEmpty()) m_ffmpeg->setText(f);
-}
-
-void PcAssetsTab::onDetectFfmpeg() {
-    const QString f = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-    if (!f.isEmpty()) {
-        m_ffmpeg->setText(f);
-        m_run->appendLog(tr("Found ffmpeg: %1").arg(f));
-    } else {
-        m_run->appendLog(tr("ffmpeg was not found on PATH."));
-    }
 }

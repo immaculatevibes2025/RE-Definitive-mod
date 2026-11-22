@@ -338,6 +338,7 @@ struct TexSlot {
     ID3D11ShaderResourceView* srv;
     int                     width;
     int                     height;
+    unsigned int            serial;   // port-only: bumped on every release
 };
 
 #define MARNI_MAX_TEXTURES 2048
@@ -415,6 +416,7 @@ struct MarniDX::Impl {
     ID3D11RasterizerState*   rasterScissor = nullptr;
     ID3D11BlendState*        blendAlpha    = nullptr;
     ID3D11BlendState*        blendAdd      = nullptr;
+    ID3D11BlendState*        blendAddAlpha = nullptr;
     ID3D11BlendState*        blendDisabled = nullptr;
     ID3D11SamplerState*      sampLinear    = nullptr;
     ID3D11SamplerState*      sampPoint     = nullptr;
@@ -724,6 +726,7 @@ void MarniDX::Impl::ReleaseSlot(int idx)
     if (t.srv) { t.srv->Release();   t.srv = nullptr; }
     if (t.tex) { t.tex->Release();   t.tex = nullptr; }
     t.width = 0; t.height = 0;
+    t.serial++;
 }
 
 int MarniDX::Impl::AllocSlot(ID3D11Texture2D* t, ID3D11ShaderResourceView* s,
@@ -767,6 +770,7 @@ void MarniDX::Impl::ReleaseAllState()
     if (rasterScissor) { rasterScissor->Release(); rasterScissor = nullptr; }
     if (blendAlpha)    { blendAlpha->Release();    blendAlpha    = nullptr; }
     if (blendAdd)      { blendAdd->Release();      blendAdd      = nullptr; }
+    if (blendAddAlpha) { blendAddAlpha->Release(); blendAddAlpha = nullptr; }
     if (blendDisabled) { blendDisabled->Release(); blendDisabled = nullptr; }
     if (sampLinear)    { sampLinear->Release();    sampLinear    = nullptr; }
     if (sampPoint)     { sampPoint->Release();     sampPoint     = nullptr; }
@@ -1052,7 +1056,9 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
         if (GetMonitorInfoA(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &mi)) {
             // Done BEFORE the device exists so the resulting WM_SIZE lands
             // while ready==FALSE and cannot trigger a swap-chain resize.
-            SetWindowPos(hWnd, HWND_TOPMOST,
+            // HWND_TOP, not HWND_TOPMOST: a topmost window stays in front of
+            // the app alt-tab switches to.
+            SetWindowPos(hWnd, HWND_TOP,
                          mi.rcMonitor.left, mi.rcMonitor.top,
                          mi.rcMonitor.right - mi.rcMonitor.left,
                          mi.rcMonitor.bottom - mi.rcMonitor.top,
@@ -1150,6 +1156,11 @@ BOOL MarniDX::Create(HWND hWnd, int width, int height, BOOL fullScreen,
     bd.RenderTarget[0].SrcBlend  = D3D11_BLEND_ONE;
     bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
     p->device->CreateBlendState(&bd, &p->blendAdd);
+
+    // alpha-weighted additive (MARNI_BLEND_ADD_ALPHA): src*srcA + dst
+    bd.RenderTarget[0].SrcBlend  = D3D11_BLEND_SRC_ALPHA;
+    bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    p->device->CreateBlendState(&bd, &p->blendAddAlpha);
 
     // disabled blend (straight overwrite)
     D3D11_BLEND_DESC bdOff = {};
@@ -1313,7 +1324,7 @@ BOOL MarniDX::IsReady() const { return m_pImpl && m_pImpl->ready; }
 
 void MarniDX::GetBackBufferSize(DWORD* w, DWORD* h) const
 {
-    if (w) *w = m_pImpl ? m_pImpl->width  : 0;
+    if (w) *w = m_pImpl ? m_pImpl->width : 0;
     if (h) *h = m_pImpl ? m_pImpl->height : 0;
 }
 
@@ -1806,6 +1817,53 @@ BOOL MarniDX::UpdateTexturePixels(MarniHandle tex, const void* pixelData,
     return TRUE;
 }
 
+BOOL MarniDX::ReplaceTexture(MarniHandle tex, int width, int height, const void* rgba32)
+{
+    Impl* p = m_pImpl;
+    if (!p || !p->device || !rgba32 || width <= 0 || height <= 0) return FALSE;
+    if (tex <= 0 || tex >= MARNI_MAX_TEXTURES) return FALSE;
+    TexSlot& t = p->slots[tex];
+    if (!t.tex) return FALSE;
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width            = (UINT)width;
+    td.Height           = (UINT)height;
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd = {};
+    sd.pSysMem     = rgba32;
+    sd.SysMemPitch = (UINT)width * 4;
+    ID3D11Texture2D* nt = nullptr;
+    if (FAILED(p->device->CreateTexture2D(&td, &sd, &nt)) || !nt) return FALSE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sdv = {};
+    sdv.Format              = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sdv.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sdv.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* ns = nullptr;
+    if (FAILED(p->device->CreateShaderResourceView(nt, &sdv, &ns)) || !ns) {
+        nt->Release();
+        return FALSE;
+    }
+    if (t.srv) t.srv->Release();
+    if (t.tex) t.tex->Release();
+    t.tex = nt;
+    t.srv = ns;
+    t.width = width;
+    t.height = height;
+    return TRUE;
+}
+
+unsigned int MarniDX::TextureSerial(MarniHandle tex) const
+{
+    const Impl* p = m_pImpl;
+    if (!p || tex <= 0 || tex >= MARNI_MAX_TEXTURES) return 0;
+    return p->slots[tex].serial;
+}
+
 void MarniDX::GetTextureSize(MarniHandle tex, int* w, int* h) const
 {
     Impl* p = m_pImpl;
@@ -1884,6 +1942,7 @@ static void DrawQuadInternal(MarniDX::Impl* p, const QuadVertex verts[6],
 
     ID3D11BlendState* bs = p->blendAlpha;
     if (blend == MARNI_BLEND_ADD)       bs = p->blendAdd;
+    else if (blend == MARNI_BLEND_ADD_ALPHA) bs = p->blendAddAlpha;
     else if (blend == MARNI_BLEND_DISABLE) bs = p->blendDisabled;
     if (!bs) bs = p->blendAlpha;
     float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -1967,6 +2026,7 @@ void MarniDX::DrawTriangles(const float* verts, int triCount, MarniHandle tex,
 
     ID3D11BlendState* bs = p->blendAlpha;
     if (blend == MARNI_BLEND_ADD)       bs = p->blendAdd;
+    else if (blend == MARNI_BLEND_ADD_ALPHA) bs = p->blendAddAlpha;
     else if (blend == MARNI_BLEND_DISABLE) bs = p->blendDisabled;
     if (!bs) bs = p->blendAlpha;
     float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -2024,6 +2084,7 @@ void MarniDX::DrawTriangles3D(const float* verts, int triCount, MarniHandle tex,
 
     ID3D11BlendState* bs = p->blendAlpha;
     if (blend == MARNI_BLEND_ADD)       bs = p->blendAdd;
+    else if (blend == MARNI_BLEND_ADD_ALPHA) bs = p->blendAddAlpha;
     else if (blend == MARNI_BLEND_DISABLE) bs = p->blendDisabled;
     if (!bs) bs = p->blendAlpha;
     float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -2092,6 +2153,7 @@ void MarniDX::DrawTrianglesPersp(const float* verts, int triCount, MarniHandle t
 
     ID3D11BlendState* bs = p->blendAlpha;
     if (blend == MARNI_BLEND_ADD)       bs = p->blendAdd;
+    else if (blend == MARNI_BLEND_ADD_ALPHA) bs = p->blendAddAlpha;
     else if (blend == MARNI_BLEND_DISABLE) bs = p->blendDisabled;
     if (!bs) bs = p->blendAlpha;
     float bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };

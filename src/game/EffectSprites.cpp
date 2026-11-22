@@ -17,6 +17,8 @@
 #include <cstring>
 #include "../system/AssetPath.h"
 #include "../DebugPrint.h"
+#include "../system/HdTextures.h"   // HdRegionScope, HdPageScope (port-only)
+#include "dc/ArrangeStages.h"          // room_effect_page_entry
 
 // TMD texture header struct (output of ParseTmdTextureHeader)
 // Packed struct matching the original byte layout (28 bytes = 0x1C)
@@ -207,6 +209,8 @@ unsigned char load_effect_sprite_data(unsigned char* effectAnimIndex, unsigned c
 // the full layout comment lives next to load_shoot_direction_data.
 extern const unsigned char kWeaponSheetPage[8];
 extern const unsigned short kWeaponSheetPageV[8];
+extern const int kWeaponSheetShiftedSrv;          // also read by EffectSystem.cpp
+extern const unsigned char kEffectTexVHackShift;
 
 // ============================================================================
 // FUN_0047bc80 (0x0047bc80) - Set up effect sprite texture pages
@@ -460,6 +464,93 @@ static void blit_effect_tim_at(DWORD* page, const unsigned char* tim,
     }
 }
 
+// ---------------------------------------------------------------------------
+// HD names for the room's effect pages (port-only, HdTextures.h).
+//
+// The pages composited above are the room's Effspr page files: page p is
+// g_EffectSpriteNames[room_effect_page_entry()[p]], the same row the effect
+// renderer reads, and the RDT's TIMs are that file's art at the same place
+// (ESP204/208/213/214/220/227/228 came out texel for texel in a dump of the
+// mansion, the lab and the Tyrant room). Classic REbirth's packs replace the
+// file's whole page, and the asset migrator installs that picture as
+// HD/<TREE>/Effspr/espNNN.webp - which until now only the weapon bands
+// (BakeWeaponSheetFromPage) were named by, so the glass bursts and the Tyrant
+// tube's cracks stayed low-res. A room may draw one sprite in another palette
+// row than the file (ESP203's and ESP229's flare / drop rows): the page source
+// then draws those texels from the composite, and a page holding a texel the
+// file does not have at all is not named.
+// ---------------------------------------------------------------------------
+// The path of Effspr page file `nameIdx` (a g_RoomEffectSpriteTable byte):
+// false for 0xFF and anything past the name table. Also used to queue the
+// room's pages for decoding (RoomBackgroundWebp.cpp, room_hd_prefetch_early).
+bool effspr_page_path(unsigned char nameIdx, char* path, size_t pathSize)
+{
+    if (nameIdx >= sizeof(g_EffectSpriteNames) / sizeof(g_EffectSpriteNames[0])) return false;
+    snprintf(path, pathSize, GAME_DATA_ROOT "effspr\\%s.tim", g_EffectSpriteNames[nameIdx]);
+    return true;
+}
+
+static int render_effspr_page(unsigned char nameIdx, DWORD* out, char* path, size_t pathSize)
+{
+    if (!effspr_page_path(nameIdx, path, pathSize)) return 0;
+    const unsigned char* tim = (const unsigned char*)g_TimImageBuffer;
+    unsigned int size = LoadFile(path, (void*)tim, 0x20);
+    // 8 bpp with a 256 x 1 CLUT and a 256 x 256 image: the layout every
+    // shipped Effspr file has (see BakeWeaponSheetFromPage).
+    if (size < 20 + 512 + 12 + 256 * 256) return 0;
+    if (*(const unsigned int*)tim != 0x10 || *(const unsigned int*)(tim + 4) != 9) return 0;
+    if (*(const unsigned short*)(tim + 16) != 256 || *(const unsigned short*)(tim + 18) != 1) return 0;
+    const unsigned short* clut = (const unsigned short*)(tim + 20);
+    const unsigned char* img = tim + 20 + 512;
+    if (*(const unsigned short*)(img + 8) != 128 || *(const unsigned short*)(img + 10) != 256) return 0;
+    const unsigned char* pix = img + 12;
+    for (int i = 0; i < 256 * 256; i++) {
+        unsigned int idx = pix[i];
+        if (idx == 0) { out[i] = 0; continue; }       // the same key as the blit
+        unsigned short c = clut[idx];
+        unsigned int r = ((c >> 0)  & 0x1F) * 255 / 31;
+        unsigned int g = ((c >> 5)  & 0x1F) * 255 / 31;
+        unsigned int b = ((c >> 10) & 0x1F) * 255 / 31;
+        out[i] = 0xFF000000u | (b << 16) | (g << 8) | r;
+    }
+    return 1;
+}
+
+// True when every texel `page` draws is drawn by the file too.
+static bool effspr_page_within_file(const DWORD* page, const DWORD* file)
+{
+    for (int i = 0; i < 256 * 256; i++) {
+        if (page[i] != 0 && file[i] == 0) return false;
+    }
+    return true;
+}
+
+// Port-only: g_effectSpriteStpRows' mask for one sheet TIM. A row counts as
+// STP when most of its non-zero entries (0x0000 is the transparent key and
+// never drawn) carry bit 15. The shipped rows are all-or-nothing apart from a
+// stray black entry, so the majority is the row's rule.
+static unsigned char effect_tim_stp_rows(const unsigned char* tim)
+{
+    if (tim == NULL || *(const unsigned int*)tim != 0x10) return 0;
+    if ((*(const unsigned int*)(tim + 4) & 8) == 0) return 0;     // no CLUT
+    unsigned int clutW = *(const unsigned short*)(tim + 16);
+    unsigned int clutH = *(const unsigned short*)(tim + 18);
+    if (clutW == 0 || clutW > 256) return 0;
+    if (clutH > 4) clutH = 4;
+    const unsigned short* clut = (const unsigned short*)(tim + 20);
+    unsigned char mask = 0;
+    for (unsigned int r = 0; r < clutH; r++) {
+        int stp = 0, opaque = 0;
+        for (unsigned int i = 1; i < clutW; i++) {
+            unsigned short c = clut[r * clutW + i];
+            if (c == 0) continue;
+            if (c & 0x8000) stp++; else opaque++;
+        }
+        if (stp > opaque) mask |= (unsigned char)(1u << r);
+    }
+    return mask;
+}
+
 static void load_effect_sprites(void)
 {
     // The room's esp sprites use sheet slots 8-11 (the weapon FX hold 0-7),
@@ -503,6 +594,7 @@ static void load_effect_sprites(void)
             if (clutH > 1) rows = clutH;
         }
         g_effectSpriteClutRows[type] = (unsigned char)rows;
+        g_effectSpriteStpRows[type] = effect_tim_stp_rows(tim);
     }
 
     // Composite each declared room sprite into its page buffer (CLUT row 0 -
@@ -526,6 +618,23 @@ static void load_effect_sprites(void)
                            g_effectSpritePageV[type], 0);
     }
 
+    // Port-only: each page's Effspr file as the game would draw it, the HD
+    // reference for the uploads below (see render_effspr_page).
+    static DWORD s_pageFile[4][256 * 256];
+    char hdKey[4][160];
+    bool hdFile[4] = { false, false, false, false };
+    if (HdTextures_Active()) {
+        const unsigned char* entry = room_effect_page_entry();
+        for (int i = 0; i < 4; i++) {
+            char path[256];
+            hdKey[i][0] = '\0';
+            if (entry[i] == 0xFF || !render_effspr_page(entry[i], s_pageFile[i], path, sizeof(path)))
+                continue;
+            HdTextures_KeyForPath(path, hdKey[i], sizeof(hdKey[i]));
+            hdFile[i] = hdKey[i][0] != '\0';
+        }
+    }
+
     // Upload the pages that got content (some pages may stay empty).
     for (int i = 0; i < 4; i++) {
         int slot = 11 + i;
@@ -534,6 +643,8 @@ static void load_effect_sprites(void)
             if (s_pageBuffer[i][px] != 0) { hasContent = true; break; }
         }
         if (hasContent) {
+            const bool named = hdFile[i] && effspr_page_within_file(s_pageBuffer[i], s_pageFile[i]);
+            HdPageScope hdSource(named ? hdKey[i] : NULL, 256, 256, s_pageFile[i]);
             MarniCreateTexture(256, 256, 32, s_pageBuffer[i], &g_TexturePageSRV[slot]);
             g_TexturePageWidth[slot] = 256;
             g_TexturePageHeight[slot] = 256;
@@ -572,6 +683,9 @@ static void load_effect_sprites(void)
             }
             if (hasContent) {
                 int slot = 152 + i * 4 + (int)row - 1;
+                const bool named = hdFile[i] &&
+                                   effspr_page_within_file(s_pageBuffer[i], s_pageFile[i]);
+                HdPageScope hdSource(named ? hdKey[i] : NULL, 256, 256, s_pageFile[i]);
                 MarniCreateTexture(256, 256, 32, s_pageBuffer[i], &g_TexturePageSRV[slot]);
                 g_TexturePageWidth[slot] = 256;
                 g_TexturePageHeight[slot] = 256;
@@ -623,9 +737,20 @@ static void load_effect_sprites(void)
 const unsigned char kWeaponSheetPage[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
 const unsigned short kWeaponSheetPageV[8] = { 0, 64, 176, 240, 3, 27, 99, 123 };
 
+// Port-only: SRVs 168..175 hold each weapon sheet baked kEffectTexVHackShift
+// rows further down its page - the art the original's room 70C special case
+// (EffectActor_UpdateAndRender 0x0047c2f0) samples. Only baked in that room.
+const int kWeaponSheetShiftedSrv = 168;
+const unsigned char kEffectTexVHackShift = 0x7b;
+
 // Bake weapon sheet `slot` (its SRV lives at 3+slot) from the Effspr page file
 // `fileName` (an esp*.tim name, no extension). Returns 1 on success.
-static int BakeWeaponSheetFromPage(int slot, const char* pageName)
+//
+// `vShift` / `srvSlot` bake the same sheet-sized band from `vShift` rows further
+// down the page into another SRV (see kWeaponSheetShiftedSrv); 0 / -1 is the
+// normal bake.
+static int BakeWeaponSheetFromPage(int slot, const char* pageName,
+                                   unsigned short vShift = 0, int srvSlotArg = -1)
 {
     if (slot < 0 || slot >= 8) return 0;
     unsigned char type = g_abEffSpriteIndexTable[slot];
@@ -681,6 +806,12 @@ static int BakeWeaponSheetFromPage(int slot, const char* pageName)
     }
     if (nextV < height + pageV) height = (unsigned short)(nextV - pageV);
 
+    // The shifted bake reads the same-sized band `vShift` rows lower, so the
+    // sheet's local UVs address it unchanged.
+    pageV = (unsigned short)(pageV + vShift);
+    if (pageV >= 256) return 0;
+    if (pageV + height > 256) height = (unsigned short)(256 - pageV);
+
     static DWORD rgba[256 * 256];
     const unsigned char* pix = p;
     for (unsigned short y = 0; y < height; y++) {
@@ -697,11 +828,17 @@ static int BakeWeaponSheetFromPage(int slot, const char* pageName)
         }
     }
 
-    int srvSlot = 3 + slot;
+    int srvSlot = (srvSlotArg >= 0) ? srvSlotArg : 3 + slot;
     if (g_TexturePageSRV[srvSlot] != MARNI_NULL_HANDLE) {
         if (Marni_DX() != NULL) Marni_DX()->DestroyTexture(g_TexturePageSRV[srvSlot]);
         g_TexturePageSRV[srvSlot] = MARNI_NULL_HANDLE;
     }
+    // Port-only: the band is rows [pageV, pageV + height) of the esp page, so
+    // an HD picture of the page, "HD/<TREE>/effspr/espNNN.webp", gives it
+    // (HdTextures.h).
+    char hdKey[160];
+    HdRegionScope hdSource(HdTextures_KeyForPath(path, hdKey, sizeof(hdKey)),
+                           0, pageV, 256, height, 256, 256);
     MarniCreateTexture(256, height, 32, rgba, &g_TexturePageSRV[srvSlot]);
     g_TexturePageWidth[srvSlot] = 256;
     g_TexturePageHeight[srvSlot] = height;
@@ -716,13 +853,72 @@ static int BakeWeaponSheetFromPage(int slot, const char* pageName)
 // mansion palette everywhere.
 void RebakeWeaponSheetsForRoom(void)
 {
-    unsigned char nameIdx = g_RoomEffectSpriteTable
-        [(get_stage_id() * 0x20 + (unsigned int)g_roomId) * 4 + 1];
+    const unsigned int row = (get_stage_id() * 0x20 + (unsigned int)g_roomId) * 4;
+
+    // The shifted copies belong to one room only; drop the last room's.
+    for (int slot = 0; slot < 8; slot++) {
+        int srv = kWeaponSheetShiftedSrv + slot;
+        if (g_TexturePageSRV[srv] != MARNI_NULL_HANDLE) {
+            if (Marni_DX() != NULL) Marni_DX()->DestroyTexture(g_TexturePageSRV[srv]);
+            g_TexturePageSRV[srv] = MARNI_NULL_HANDLE;
+        }
+    }
+
+    unsigned char nameIdx = g_RoomEffectSpriteTable[row + 1];
     if (nameIdx == 0xFF) return;
     const char* pageName = (const char*)(g_EffectSpriteNames + nameIdx);
     for (int slot = 4; slot < 8; slot++) {
         BakeWeaponSheetFromPage(slot, pageName);
     }
+
+    // Port-only: room 70C's Yawn dust (see effect_submit_sprite). The original
+    // samples the band 0x7B rows below a tint 1/2 sprite on the same page, so
+    // bake that band for every weapon sheet, from the page file it lives on.
+    if (g_stageId == STAGE_MANSION_RETURN_2F && g_roomId == ROOM_LESSON_ROOM) {
+        for (int slot = 0; slot < 8; slot++) {
+            unsigned char fileIdx = g_RoomEffectSpriteTable[row + kWeaponSheetPage[slot]];
+            if (fileIdx == 0xFF) continue;
+            BakeWeaponSheetFromPage(slot, (const char*)(g_EffectSpriteNames + fileIdx),
+                                    kEffectTexVHackShift, kWeaponSheetShiftedSrv + slot);
+        }
+    }
+}
+
+// ============================================================================
+// apply_dc_shoot_camera_glass_fix - port-added, no original address.
+//
+// The shoot-the-camera easter egg (weapon_shoot_camera_effect) spawns type 5,
+// animation 2 (depthGroup 0x12). In core00.esp that animation has two phases:
+//   phase 1: behaviour 0x1F (set frame 0x12), update 0x02 (timer, 0 ticks)
+//   phase 2: behaviour 0x36 (effect_behavior_random_spin)
+// The 1997 PC release and the PS1 original (SLUS_001.70) ship this data
+// as-is, so the glass jitters by +-5/15 units a frame, 512 units from the lens,
+// for as long as its sprite animation runs (about a second). The PS1
+// Director's Cut changed exactly ONE byte of CORE00.ESP (file offset 0x1E0,
+// 0x36 -> 0x00): phase 2's behaviour id becomes 0, which is the pool's "free"
+// marker, so the glass shows for one or two frames and never moves. The port
+// takes the Director's Cut behaviour in every mode.
+//
+// It writes 0x2F (effect_behavior_kill) rather than the DC's 0x00. A slot whose
+// id is zeroed by a phase change is dropped without g_freeEffectSlots++, so the
+// DC data leaks one pool count per glass sprite until the next room load (64
+// camera shots in one room and no effect spawns any more). Kill frees the slot
+// properly; the glass is drawn on the spawn frame and the one after it.
+//
+// The patch only touches the loaded buffer, and only when the block has the
+// shape and values above, so a modified core00.esp is left alone.
+// ============================================================================
+static void apply_dc_shoot_camera_glass_fix(void)
+{
+    if (g_effectAnimData[5] == 0 || g_effectAnimData[5] == 0xFFFFFFFF) return;
+    unsigned char* animBase = (unsigned char*)g_effectAnimData[5];
+    unsigned int* table = (unsigned int*)(animBase + (unsigned int)animBase[2] * 4);
+    if (table[0] != 1 || table[1] != 2) return;            // one slot, two phases
+    unsigned char* phase1 = (unsigned char*)&table[2];
+    unsigned char* phase2 = phase1 + 0x18;
+    if (phase1[0] != 0x1F || phase1[1] != 0x02) return;
+    if (phase2[0] != 0x36 && phase2[0] != 0x00) return;   // PC/PS1 OG or DC file
+    phase2[0] = 0x2F;
 }
 
 void load_shoot_direction_data(void)
@@ -746,6 +942,7 @@ void load_shoot_direction_data(void)
     unsigned char* espEnd = espBase + (size & 0xfffffffc) + ((size & 3) ? 4 : 0) - 4;
     g_loadDataDestPointer = espEnd;
     unsigned char lastValid = load_effect_sprite_data(espBase, espEnd, espBase, 0);
+    apply_dc_shoot_camera_glass_fix();
 
     // 0x0045fc0f: load core00.etm; its trailing dwords are per-sprite image
     // offsets relative to the etm buffer.
@@ -756,6 +953,14 @@ void load_shoot_direction_data(void)
                           + ((size & 3) ? 4 : 0);
     for (unsigned char i = 0; i < lastValid; i++) {
         DAT_00ac9cd0[i] = (int)g_DataBuffer + *(int*)(etmEnd - 4 - i * 4);
+        // Port-only: the PS1 STP rows of each weapon sheet. core00.etm keeps
+        // them (it is byte-identical to the PS1 disc's); the Effspr pages the
+        // sheets are baked from below do not.
+        unsigned char type = g_abEffSpriteIndexTable[i];
+        if (type < 50) {
+            g_effectSpriteStpRows[type] =
+                effect_tim_stp_rows((const unsigned char*)DAT_00ac9cd0[i]);
+        }
     }
 
     setup_effect_sprite_textures(0);
@@ -881,6 +1086,7 @@ void InitRoomEffSprite(void)
             g_effectSpriteSheetSlot[spriteIdx] = 0xFF;
             g_effectSpritePageV[spriteIdx] = 0;
             g_effectSpriteClutRows[spriteIdx] = 0;
+            g_effectSpriteStpRows[spriteIdx] = 0;
         }
     } while (i < 8);
 

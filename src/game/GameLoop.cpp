@@ -22,6 +22,9 @@
 #include "../DebugPrint.h"
 #include "../system/AssetPath.h"
 #include "BattleGame.h"       // battle_frame (Saturn Battle Game mod)
+#include "saturn/SaturnRoomObjects.h"
+#include "saturn/SaturnBattle.h"
+#include "saturn/SaturnTyrant.h"
 
 // Forward declarations for functions only used within game_loop
 extern void FUN_00473f10(int* baseAddr, unsigned int bitIndex);
@@ -52,6 +55,12 @@ int game_loop(void)
     while ((g_menu_choice_id & 0x80) != 0) {
         Task_sleep(1);
     }
+
+    // Sega Saturn Battle Game: the run clock starts here, once the opening
+    // message has closed. GAME5's start-up ends with the same wait - it spins
+    // on bit 7 of 0x002F8665, its g_menu_choice_id, at 0x0602CF0A-0x0602CF16 -
+    // and raises the clock bit after it (0x0602CF3C). No-op outside a run.
+    saturn_battle_clock_run(1);
 
     // 0x00480b53: Mark gameplay active
     g_main_state_flags |= MSF_GAMEPLAY_ACTIVE;
@@ -320,6 +329,11 @@ LAB_00480e89:
                     g_PlayerDpadPressed &= 0xC000;
                 }
 
+                // Sega Saturn additions (capsule collision, Battle Game run).
+                if (g_bSaturnMode && saturn_game_loop_update()) {
+                    return 1;
+                }
+
                 // 0x00480ebd-0x00480ecf: Player animation and position update
                 update_player_anim();
                 g_main_state_flags2 &= ~MSF2_EFFECT_ZONE;
@@ -338,10 +352,13 @@ LAB_00480e89:
                     if (g_battleEndingCam == 0) {
                         DrawFadeSpr();
                     }
+                    if (g_bSaturnMode) saturn_room_objects_update();
+
                     update_room_objects();
 
                     // 0x00480ed4: Draw the room's own 3D objects (omodels + item models)
-                    if (g_dwRoomObjectRenderEnabled != 0 && g_battleEndingCam == 0) {
+                    if (g_dwRoomObjectRenderEnabled != 0 && g_battleEndingCam == 0 &&
+                        !(g_bSaturnMode && saturn_room_objects_hidden())) {
                         render_room_objects();
                     }
 
@@ -414,6 +431,12 @@ LAB_00480e89:
                 }
             }
             else {
+                // Battle mode has no self-destruct timer. Rejoin the normal
+                // gameplay path so the run clock is drawn alongside the room,
+                // rather than falling through to the explosion countdown.
+                if (g_bSaturnMode && g_saturnBattleActive) {
+                    goto LAB_00480d7c;
+                }
                 // ----- Countdown timer active (self-destruct sequence) -----
                 if (g_CountdownTimer != 180) {
                     // 0x00480cb4-0x00480d7c: Display countdown timer.
@@ -608,7 +631,8 @@ void check_menus_state(void)
         // Option Mode requested (START+bit8 combo detected in game_loop)
         g_main_state_flags &= ~MSF_OPTIONS_REQUEST;
         g_loadSaveStateFlag = 1;
-        // 0x00481621: PUSH 0x4761b0 (options_menu)
+        // 0x00481621: PUSH 0x4761b0 (options_menu). Definitive Mod: the
+        // original option screen with its VIDEO tab (OptionsMenu.cpp).
         Task_execute(1, (void*)options_menu);
     } else {
         // 0x00481628: PUSH 0x463710 (main_menu)

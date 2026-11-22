@@ -4,6 +4,7 @@
 #include "../Globals.h"
 #include "../platform/platform.h"
 #include "../system/AssetPath.h"
+#include "../system/HdTextures.h"   // HdTextures_NoteLoad (port-only)
 #include "FileLoader.h"
 #include <stdio.h>
 
@@ -56,6 +57,9 @@ size_t LoadFile(const char* path, void* buffer, unsigned char flags)
             fclose(fp);
 
             if (bytesRead == fileSize) {
+                // Port-only: remember what is in `buffer`, so a texture built
+                // straight from it can be named after the file (HdTextures.h).
+                HdTextures_NoteLoad(buffer, fileSize, path);
                 return fileSize;
             }
 
