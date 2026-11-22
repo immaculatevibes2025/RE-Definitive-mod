@@ -6,6 +6,7 @@
 #include "../DebugPrint.h"
 #include "../platform/platform.h"
 #include "AssetPath.h"   // SetAssetBase / SetSaveRoot / SetAssetVersion
+#include "HdTextures.h"  // HdTextures_Configure
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +58,26 @@ const OwnedKey kOwnedKeys[] = {
     { "Display", "Interpolate60" },  // port-added (Option Mode > VIDEO, F2 menu)
 };
 const int kOwnedKeyCount = (int)(sizeof(kOwnedKeys) / sizeof(kOwnedKeys[0]));
+
+// The keys the title-screen options menu edits. They are the player's, so the
+// exit-time save above leaves them alone; ConfigFile_SaveGameSettings() writes
+// them when the menu is left. Kept apart for a second reason: a Battle Game run
+// from OG/DC borrows Saturn mode by changing g_GameMode for its duration, and a
+// save on exit in the middle of one must not record that as the player's choice.
+const OwnedKey kGameKeys[] = {
+    { "Assets", "Version" },
+    { "Game",   "Mode" },
+    { "Game",   "Ps1EndingCredits" },
+    { "Game",   "Ps1FmvSubtitles" },
+    { "Game",   "SkipUnskippableFmv" },
+    { "Game",   "BattleGame" },
+    { "Game",   "WesternDifficulty" },
+    { "Textures", "HdTextures" },
+};
+
+// -1 = not chosen in the menu: write what is running.
+int s_hdTexturesPending = -1;
+const int kGameKeyCount = (int)(sizeof(kGameKeys) / sizeof(kGameKeys[0]));
 
 BOOL FileExists(const char* path)
 {
@@ -174,7 +195,8 @@ const char* ResolveConfiguredPath(const char* exeDir, const char* value,
 }
 
 // Static line pool for keys that have to be inserted rather than replaced.
-char s_newLine[64][700];      // mod: room for every owned key
+#define NEW_LINE_POOL 64   // mod: room for every owned key
+char s_newLine[NEW_LINE_POOL][700];
 int  s_newLineUsed = 0;
 
 void SetValue(const char* section, const char* key, const char* value,
@@ -215,14 +237,14 @@ void SetValue(const char* section, const char* key, const char* value,
         if ((size_t)(keyEnd - p) != keyLen || strncmp(p, key, keyLen) != 0) continue;
 
         // Replace in place.
-        if (s_newLineUsed < 64) {
+        if (s_newLineUsed < NEW_LINE_POOL) {
             snprintf(s_newLine[s_newLineUsed], sizeof(s_newLine[0]), "%s=%s", key, value);
             lines[i] = s_newLine[s_newLineUsed++];
         }
         return;
     }
 
-    if (*count + 3 >= MAX_LINES || s_newLineUsed + 3 > 64) return;
+    if (*count + 3 >= MAX_LINES || s_newLineUsed + 3 > NEW_LINE_POOL) return;
 
     if (sectionHeader < 0) {
         // Unknown section: append it whole.
@@ -427,6 +449,12 @@ void ConfigFile_EnsureExists(void)
         ";            DC/ folder beside USA/ holding only the files it changes or\n"
         ";            adds; anything it does not carry falls back to the tree\n"
         ";            [Assets] Version selects.\n"
+        ";   SATURN = the Sega Saturn release, which adds the Tick, Zombie Wesker\n"
+        ";            and the Battle Game on top of the campaign. Needs a SATURN/\n"
+        ";            folder beside USA/ holding ONLY what the Saturn adds; the\n"
+        ";            rooms, data and everything else it shares with the PC\n"
+        ";            release fall back to the tree [Assets] Version selects.\n"
+        ";   DS     = folder name reserved; no code behind it yet.\n"
         "; 1 = use the PS1 staff-credit overlay in the ending FMVs. DC enables it\n"
         "; automatically; OG leaves it off unless this key is set.\n"
         "Ps1EndingCredits=%d\n"
@@ -438,6 +466,22 @@ void ConfigFile_EnsureExists(void)
         "; per-movie mask leaves the endings, the staff rolls and two of the\n"
         "; cutscenes unskippable; set this to 1 to make those skippable too.\n"
         "SkipUnskippableFmv=%d\n"
+        "; 1 = play the PC release with the rules the PS1 / Saturn USA releases and\n"
+        "; the Director's Cut ship: second-playthrough enemies from the first run,\n"
+        "; no auto-aim, 2 ink ribbons per pick-up. Always on in Mode=SATURN and in\n"
+        "; Mode=DC (except TRAINING), so it only matters for Mode=OG.\n"
+        "WesternDifficulty=%d\n"
+        "\n"
+        "[Textures]\n"
+        "; 1 = use the high-resolution replacements in the HD/ folder beside\n"
+        "; USA/: a file HD/<hash>.webp is drawn in place of the texture whose\n"
+        "; pixels hash to that name, at whatever resolution it has. Costs\n"
+        "; nothing while the folder does not exist. See docs/HD_TEXTURES.md.\n"
+        "HdTextures=1\n"
+        "; 1 = write every texture the game uploads to HD/dump/<hash>.png, once\n"
+        "; each - the originals a replacement set is made from. Leave it off for\n"
+        "; normal play.\n"
+        "DumpTextures=0\n"
         "\n"
         "[Mods]\n"
         "; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.\n"
@@ -475,6 +519,7 @@ void ConfigFile_EnsureExists(void)
         g_bPs1EndingCredits ? 1 : 0,
         g_bPs1FmvSubtitles ? 1 : 0,
         g_bSkipUnskippableFmv ? 1 : 0,
+        g_bWesternDifficultyOption ? 1 : 0,
         (unsigned)g_dwPlayCount, (unsigned)g_dwClearCount);
     (void)keyHex; (void)sideHex;
 
@@ -563,8 +608,10 @@ BOOL ConfigFile_Load(void)
         g_dwTestShieldKey  = (DWORD)ReadInt(path, "Testing", "ShieldKey", 0);
     }
     // Mod: the GAME PAD bindings, set in Option Mode and shared by every save.
-    if (ReadValue(path, "Input", "PadDef", buf, sizeof(buf)) && buf[0] != '\0') {
-        HexDecode(buf, (BYTE*)g_JoyRemapTbl[1], 128);
+    // Only a complete value is taken: a short one would leave half a table behind.
+    if (ReadValue(path, "Input", "PadDef", buf, sizeof(buf)) &&
+        strlen(buf) == sizeof(g_JoyRemapTbl[1]) * 2) {
+        HexDecode(buf, (BYTE*)g_JoyRemapTbl[1], (int)sizeof(g_JoyRemapTbl[1]));
     }
 
     // Asset and save folders. [Assets] Path is the folder that holds the USA/
@@ -640,6 +687,15 @@ BOOL ConfigFile_Load(void)
         g_testStartCourtyard  = ReadInt(path, "Testing", "StartCourtyard", 0);
         g_testStartBeforeYawn = ReadInt(path, "Testing", "StartBeforeYawn", 0);
     }
+    // Saturn Battle Game title item, forced on without an ending. The unlock
+    // itself still lives in the save block; this only overrides the test.
+    g_bSaturnBattleGame = ReadInt(path, "Game", "BattleGame", 0) != 0;
+    // Western difficulty for the PC release and the DC (not TRAINING); the USA Saturn forces it.
+    g_bWesternDifficultyOption = ReadInt(path, "Game", "WesternDifficulty", 0) != 0;
+    // Port-added: high-resolution texture replacement and the dump that feeds
+    // it (system/HdTextures.h).
+    HdTextures_Configure(ReadInt(path, "Textures", "HdTextures", 1) != 0,
+                         ReadInt(path, "Textures", "DumpTextures", 0) != 0);
     dbg_printf("[CONFIG] mode=%s overlay=%s ps1_credits=%d\n", GameModeName(g_GameMode),
                GetAssetModeName()[0] ? GetAssetModeName() : "(none)",
                g_bPs1EndingCredits ? 1 : 0);
@@ -655,7 +711,7 @@ BOOL ConfigFile_Load(void)
 }
 
 // ---------------------------------------------------------------------------
-void ConfigFile_Save(void)
+static void SaveKeys(BOOL gameSettings, int gameMode, int regionJpn)
 {
     const char* path = ConfigFile_Find();
 
@@ -719,6 +775,29 @@ void ConfigFile_Save(void)
         SetValue(kOwnedKeys[i].section, kOwnedKeys[i].key, values[i], lines, &count);
     }
 
+    // Static: this runs on a game task's stack when the options menu saves.
+    static char padHex[32 * 4 * 2 + 1];
+    if (gameSettings) {
+        char game[kGameKeyCount][16];
+        snprintf(game[0], sizeof(game[0]), "%s", regionJpn ? "JPN" : "USA");
+        snprintf(game[1], sizeof(game[1]), "%s", GameModeName(gameMode));
+        snprintf(game[2], sizeof(game[2]), "%d", g_bPs1EndingCredits ? 1 : 0);
+        snprintf(game[3], sizeof(game[3]), "%d", g_bPs1FmvSubtitles ? 1 : 0);
+        snprintf(game[4], sizeof(game[4]), "%d", g_bSkipUnskippableFmv ? 1 : 0);
+        snprintf(game[5], sizeof(game[5]), "%d", g_bSaturnBattleGame ? 1 : 0);
+        snprintf(game[6], sizeof(game[6]), "%d", g_bWesternDifficultyOption ? 1 : 0);
+        snprintf(game[7], sizeof(game[7]), "%d",
+                 s_hdTexturesPending >= 0 ? s_hdTexturesPending : (HdTextures_ReplaceEnabled() ? 1 : 0));
+        for (int i = 0; i < kGameKeyCount; ++i) {
+            SetValue(kGameKeys[i].section, kGameKeys[i].key, game[i], lines, &count);
+        }
+        // The gamepad layout: g_JoyRemapTbl[1], 32 little-endian dwords. A key
+        // of its own - SideDef above is the 1997 installer's blob, which the
+        // game reads and writes back but never applies to the live table.
+        HexEncode((const BYTE*)g_JoyRemapTbl[1], (int)sizeof(g_JoyRemapTbl[1]), padHex);
+        SetValue("Input", "PadDef", padHex, lines, &count);
+    }
+
     f = fopen(path, "w");
     if (f == NULL) {
         dbg_printf("[CONFIG] could not write %s\n", path);
@@ -732,4 +811,24 @@ void ConfigFile_Save(void)
     for (int i = 0; i < mallocedCount; ++i) {
         free(malloced[i]);
     }
+}
+
+void ConfigFile_Save(void)
+{
+    SaveKeys(FALSE, 0, 0);
+}
+
+void ConfigFile_SaveGameSettings(int gameMode, int regionJpn)
+{
+    SaveKeys(TRUE, gameMode, regionJpn);
+}
+
+void ConfigFile_SetHdTextures(int enabled)
+{
+    s_hdTexturesPending = enabled ? 1 : 0;
+}
+
+const char* ConfigFile_GameModeName(int mode)
+{
+    return GameModeName(mode);
 }

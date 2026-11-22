@@ -5,11 +5,19 @@
 #include "../marni/PSXTexture.h"
 #include "FileLoader.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include "../platform/platform.h"     // plat_file_read_all (HD skin check)
 #include "../system/AssetPath.h"
 #include "../platform/platform.h"   // plat_normalize_path (mod: emd_asset_exists)
+#include "../system/HdTextures.h"
 #include "dc/EntityModels.h"
 #include "BattleGame.h"       // battle_emd_override (Saturn Battle Game mod)
 #include "dc/Items.h"        // DC_ITEM_BERETTA_CUSTOM
+#include "saturn/SaturnModels.h"
+#include "saturn/SaturnBattle.h"
+#include "Bonus.h"
+#include "WeaponTexture.h"
 
 // ============================================================================
 // Extern data declarations (not yet extracted to Globals.h)
@@ -22,12 +30,15 @@ extern DWORD DAT_004d2bf4;                     // 0x004d2bf4 - TMD processing fl
 extern void SetAnimSlot(AnimSlot* slots, int slotPtr, int index);         // TmdAnimation.cpp
 extern unsigned int* CreateAnimObject(int slotPtr, unsigned int* param2); // TmdAnimation.cpp
 extern DWORD g_tmdAsyncData;                   // 0x008fc424 - TMD async data
+extern void TmdAsync_SetHdSource(const void* tim, const char* key,
+                                 bool perPalette = false);           // TmdAnimation.cpp (port)
 extern DWORD DAT_004c1a2c;                     // 0x004c1a2c
 extern DWORD DAT_00ae9f04;                     // 0x00ae9f04
 extern BYTE  g_textureQueueData[40];           // 0x00d22740
 extern DWORD g_animSlotIndex;                  // 0x008f8c78
 extern DWORD g_textureBankRedirect[32];        // 0x00aae2b0
 extern DWORD g_bCostumeVariant;                     // 0x004d6444
+extern unsigned int Flg_ck(int baseAddr, unsigned int bitIndex);   // CmdFunctions.cpp
 
 // Player/weapon angle globals
 extern int g_weaponAngle_Special;              // 0x004c2028
@@ -63,8 +74,16 @@ int __stdcall VideoDriver_ClearState348(void* obj, void* context);
 // Jill scenario was misaligned throughout. Verified against 0x004c1320: index 26
 // through 35 are em100a, index 36 is em1020, index 53 is char10, index 79
 // through 88 are em110a and index 89 is em1020.
+//
+// Port: the original's 106 rows are followed by a third block, the bonus
+// outfits (Bonus.h, EMD_ROW_BONUS_FIRST). Those are the Director's Cut's and
+// the Saturn's exclusive player models, which the asset migrator copies into
+// the base tree under names no release uses so they cannot collide with the
+// PC's own EM1032/EM1033. Nothing reaches these rows through the block
+// formula - its largest index is 53 + 52 = 105 - only LoadEntityEMD's bonus
+// override does, by row number.
 // ============================================================================
-static const char g_emdPathTable[106][17] = {
+static const char g_emdPathTable[112][17] = {
     //  Player
     "enemy/char10.emd", // chris
     "enemy/char11.emd", // jill
@@ -121,8 +140,8 @@ static const char g_emdPathTable[106][17] = {
     "enemy/em102c.emd", // Rebecca, cutscene anim variant (texture identical to em1023)
     "enemy/em102d.emd", // Barry, cutscene anim variant (texture identical to em1022)
     "enemy/em102e.emd", // Wesker, cutscene anim variant (texture identical to em1024)
-    "enemy/em1030.emd", // Chris, alternative outfit 1
-    "enemy/em1032.emd", // Chris, alternative outfit 2
+    "enemy/em1030.emd", // Chris alternative outfit 1
+    "enemy/em1032.emd", // Chris alternative outfit 2 (PC exclusive)
 
     // Jill offset
     "enemy/char10.emd",
@@ -176,9 +195,22 @@ static const char g_emdPathTable[106][17] = {
     "enemy/em102c.emd",
     "enemy/em102d.emd",
     "enemy/em102e.emd",
-    "enemy/em1031.emd", // Jill (alternative outfit 1)
-    "enemy/em1033.emd", // Jill (alternative outfit 2)
+    "enemy/em1031.emd", // Jill alternative outfit 1 (Black tanktop)
+    "enemy/em1033.emd", // Jill alternative outfit 2 (Red tanktop) PC exclusive
+
+    // Bonus outfits (port; rows EMD_ROW_BONUS_FIRST.., see Bonus.h)
+    "enemy/em1052.emd", // 106: Chris, Director's Cut arrange outfit (DC EM1032)
+    "enemy/em1053.emd", // 107: Jill, Director's Cut arrange outfit (DC EM1033)
+    "enemy/em1055.emd", // 108: Rebecca, Director's Cut arrange outfit (DC EM1035)
+    "enemy/em1061.emd", // 109: Chris, Saturn exclusive outfit
+    "enemy/em1161.emd", // 110: Jill, Saturn exclusive outfit
+    "enemy/em1035.emd", // 111: Rebecca's DC outfit under the DC overlay's own
+                        //      name, for a tree migrated before the base copy
 };
+// The size is written as a literal above because tools/verify_saturn_models.py
+// and tools/verify_dc_entity_models.py find the table by its declaration.
+static_assert(sizeof(g_emdPathTable) / sizeof(g_emdPathTable[0]) == EMD_ROW_COUNT,
+              "g_emdPathTable must hold the two 53-entry blocks plus the bonus rows");
 
 // ============================================================================
 // Weapon animation path table (0x004c1ca8)
@@ -492,6 +524,193 @@ bool mod_asset_exists(const char* relPath)
 }
 
 // ============================================================================
+// LoadNpcOutfit - port-added (no original address).
+// Puts a bonus outfit (Bonus.h) on a cutscene NPC that has just been loaded.
+//
+// An EMD ends in a five-dword directory: [1] skeleton, [2] animations, [3] mesh,
+// [4] texture, with the mesh and the texture the last two sections. A player
+// model and the NPC of the same character differ only in the first two: CHAR10
+// and EM1020 carry the same mesh byte for byte, and the Director's Cut's NPC
+// outfit models are built the same way (EM1040's mesh is EM1032's, EM1043's and
+// EM104C's are EM1035's). So the outfit's mesh and texture replace the NPC's
+// own, and the NPC keeps its skeleton and its cutscene animations.
+//
+// The joint offsets come across too: they are the same in every PC and DC file
+// of a character, but a Saturn-converted model has its own, and the mesh is
+// modelled around them.
+//
+// npcBase/npcSize: the NPC file as LoadEntityEMD read it. *modelPtr and
+// g_loadDataDestPointer are moved onto the outfit's mesh and texture, and
+// hdKey (hdKeySize bytes) onto the outfit's file, whose texture it now is. On
+// any failure the NPC is left exactly as loaded.
+// ============================================================================
+// Port-only (HD skins, HdTextures_SetBaseFallback): a model read from a mode's
+// tree may borrow the base release's HD skin of the same file name only when
+// both files' TIMs show the same picture (EmdTimsLookAlike). The DC and Saturn overlays reuse PC names for
+// models of their own (the DC's EM1032/EM1033 are its outfits, the PC's the PC
+// outfits; the Saturn's EM1016 is the Tick), and the base skin laid over their
+// UVs is a patchwork. `file`/`size` is the EMD as loaded, `relPath` its path
+// under the tree, `key` its HD key. Decided once per key.
+static const unsigned char* EmdTim(const unsigned char* file, unsigned int size, unsigned int* timSize)
+{
+    if (size < 0x20) return NULL;
+    const unsigned int end = size & 0xFFFFFFFC;
+    const unsigned int tim = ((const unsigned int*)(file + end - 0x14))[4] & 0xFFFFFFFC;
+    if (tim >= end - 0x14) return NULL;
+    *timSize = end - 0x14 - tim;
+    return file + tim;
+}
+
+// Whether two EMD TIMs show the same picture. Byte equality is too strict: the
+// DC re-saved the PC's own skins (CHAR10/CHAR11, EM1030/EM1031) with the gaps
+// between UV islands repainted and CHAR11's palette reordered - 1.8-2.5% of the
+// texels look different, none of them drawn - while its outfits EM1032/EM1033
+// differ in 57-70%. So the texels are compared by colour (8 bpp, the palette
+// row for each 128-texel column half as the EMD lays them out, 2 steps a
+// channel), and up to 10% may differ. Other layouts fall back to bytes.
+static bool EmdTimsLookAlike(const unsigned char* a, unsigned int aSize,
+                             const unsigned char* b, unsigned int bSize)
+{
+    if (aSize == bSize && memcmp(a, b, aSize) == 0) return true;
+    struct Tim8 {
+        const unsigned short* clut; int clutW, clutH;
+        const unsigned char* px; int w, h;
+    };
+    struct Parse {
+        static bool Run(const unsigned char* t, unsigned int size, Tim8* o)
+        {
+            if (size < 8 + 12 || (*(const unsigned int*)(t + 4) & 0xF) != (8 | 1)) return false;
+            const unsigned int clutLen = *(const unsigned int*)(t + 8);
+            if (clutLen < 12 || 8 + clutLen + 12 > size) return false;
+            o->clutW = *(const unsigned short*)(t + 8 + 8);
+            o->clutH = *(const unsigned short*)(t + 8 + 10);
+            o->clut = (const unsigned short*)(t + 8 + 12);
+            if (o->clutW < 256 || o->clutH < 1 || 12u + (unsigned)o->clutW * o->clutH * 2 > clutLen) return false;
+            const unsigned char* img = t + 8 + clutLen;
+            const unsigned int imgLen = *(const unsigned int*)img;
+            o->w = *(const unsigned short*)(img + 8) * 2;
+            o->h = *(const unsigned short*)(img + 10);
+            o->px = img + 12;
+            return o->w > 0 && o->h > 0 && 8 + clutLen + 12 + (unsigned)o->w * o->h <= size &&
+                   12u + (unsigned)o->w * o->h <= imgLen;
+        }
+    };
+    Tim8 ta, tb;
+    if (!Parse::Run(a, aSize, &ta) || !Parse::Run(b, bSize, &tb) || ta.w != tb.w || ta.h != tb.h)
+        return false;
+    int differ = 0;
+    const int total = ta.w * ta.h;
+    for (int y = 0; y < ta.h; y++) {
+        for (int x = 0; x < ta.w; x++) {
+            const int i = y * ta.w + x;
+            const int rowA = (x / 128 < ta.clutH) ? x / 128 : ta.clutH - 1;
+            const int rowB = (x / 128 < tb.clutH) ? x / 128 : tb.clutH - 1;
+            const unsigned short ca = ta.clut[rowA * ta.clutW + ta.px[i]];
+            const unsigned short cb = tb.clut[rowB * tb.clutW + tb.px[i]];
+            if (ca == cb) continue;
+            for (int sh = 0; sh < 15; sh += 5) {
+                const int d = (int)((ca >> sh) & 31) - (int)((cb >> sh) & 31);
+                if (d > 2 || d < -2) { differ++; break; }
+            }
+        }
+    }
+    return differ * 10 <= total;
+}
+
+static void HdCheckModelBaseSkin(const char* key, const char* relPath,
+                                 const unsigned char* file, unsigned int size)
+{
+    if (!HdTextures_Active() || key == NULL || key[0] == '\0') return;
+    if (strncmp(key, "USA/", 4) == 0 || strncmp(key, "JPN/", 4) == 0) return;   // the base tree's own
+    if (HdTextures_BaseFallbackKnown(key)) return;
+
+    bool same = false;
+    unsigned int timSize = 0;
+    const unsigned char* tim = EmdTim(file, size, &timSize);
+    if (tim != NULL && AssetBaseHasFile(-1, relPath)) {
+        char savedOverlay[16] = "";
+        strncpy(savedOverlay, GetAssetModeName(), sizeof(savedOverlay) - 1);
+        SetAssetMode("");
+        char path[300];
+        char resolved[300];
+        char norm[300];
+        snprintf(path, sizeof(path), "%s%s", GAME_DATA_ROOT, relPath);
+        const char* basePath = plat_normalize_path(ResolveAssetRoot(path, resolved, sizeof(resolved)),
+                                                   norm, sizeof(norm));
+        SetAssetMode(savedOverlay);
+        size_t baseSize = 0;
+        unsigned char* base = (unsigned char*)plat_file_read_all(basePath, &baseSize);
+        if (base != NULL) {
+            unsigned int baseTimSize = 0;
+            const unsigned char* baseTim = EmdTim(base, (unsigned int)baseSize, &baseTimSize);
+            same = baseTim != NULL && EmdTimsLookAlike(baseTim, baseTimSize, tim, timSize);
+            free(base);
+        }
+    }
+    HdTextures_SetBaseFallback(key, same);
+}
+
+static void LoadNpcOutfit(const BonusModel* outfit, int npcBase, unsigned int npcSize, int* modelPtr,
+                          char* hdKey, size_t hdKeySize)
+{
+    const unsigned int npcEnd = npcSize & 0xFFFFFFFC;
+    const unsigned int* npcDir = (const unsigned int*)(npcBase + npcEnd - 0x14);
+    const unsigned int npcSkel = npcDir[1] & 0xFFFFFFFC;
+    const unsigned int npcMesh = npcDir[3] & 0xFFFFFFFC;
+    const unsigned int npcTim = npcDir[4] & 0xFFFFFFFC;
+    if (!(npcSkel < npcMesh && npcMesh < npcTim && npcTim < npcEnd - 0x14)) {
+        dbg_printf("[bonus] NPC model has an unexpected layout - outfit not applied\n");
+        return;
+    }
+
+    // Read the outfit past the NPC file, so nothing of the NPC is lost until
+    // the outfit has been checked. g_DataBuffer's port headroom covers it.
+    unsigned char* src = (unsigned char*)(npcBase + npcEnd);
+    sprintf(FILE_PATH, "%s%s", GAME_DATA_ROOT, g_emdPathTable[outfit->row]);
+    char savedOverlay[16] = "";
+    strncpy(savedOverlay, GetAssetModeName(), sizeof(savedOverlay) - 1);
+    SetAssetMode(outfit->overlay);
+    const unsigned int size = LoadFile(FILE_PATH, src, 32);
+    char outfitKey[128];
+    if (AssetSourceKey(FILE_PATH, outfitKey, sizeof(outfitKey)) == NULL) outfitKey[0] = '\0';
+    SetAssetMode(savedOverlay);
+    if (size == 0xFFFFFFFF || size < 0x20) {
+        return;
+    }
+    HdCheckModelBaseSkin(outfitKey, g_emdPathTable[outfit->row], src, size);
+
+    const unsigned int end = size & 0xFFFFFFFC;
+    const unsigned int* dir = (const unsigned int*)(src + end - 0x14);
+    const unsigned int skel = dir[1] & 0xFFFFFFFC;
+    const unsigned int mesh = dir[3] & 0xFFFFFFFC;
+    const unsigned int tim = dir[4] & 0xFFFFFFFC;
+    if (!(skel < mesh && mesh < tim && tim < end - 0x14)) {
+        dbg_printf("[bonus] %s has an unexpected layout - outfit not applied\n", FILE_PATH);
+        return;
+    }
+
+    // Skeleton header: +4 = joint count, +8 = one short[3] offset per joint
+    // (what ResetJointTransforms reads).
+    unsigned char* npcSkelPtr = (unsigned char*)(npcBase + npcSkel);
+    const unsigned char* skelPtr = src + skel;
+    const unsigned short joints = *(const unsigned short*)(skelPtr + 4);
+    if (joints == *(const unsigned short*)(npcSkelPtr + 4) && joints <= 32) {
+        memcpy(npcSkelPtr + 8, skelPtr + 8, (unsigned int)joints * 6);
+    }
+
+    // Mesh + texture, moved down over the NPC's own. The offsets inside the
+    // mesh are relative to itself, so it needs no fixing up.
+    unsigned char* dst = (unsigned char*)(npcBase + npcMesh);
+    memmove(dst, src + mesh, end - 0x14 - mesh);
+    *modelPtr = (int)dst;
+    g_loadDataDestPointer = dst + (tim - mesh);
+    if (hdKey != NULL && hdKeySize > 0) {
+        strncpy(hdKey, outfitKey, hdKeySize - 1);
+        hdKey[hdKeySize - 1] = '\0';
+    }
+}
+
+// ============================================================================
 // LoadEntityEMD (0x00462370) - Load entity EMD model file
 // Loads the EMD 3D model for the player or enemy entity.
 // Sets up animation data, texture references, and model geometry pointers.
@@ -501,28 +720,90 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
     unsigned char bVar5 = g_TextureBankID;
     unsigned char bVar6 = g_TextureCurrentPage;
 
+    // Saturn: the outfit is the pair of scenario flags its wardrobe writes
+    // (the migrator's patched ROOM11C/61C scripts), not the PC's one-way costume bit (room_set raises
+    // that bit on every wardrobe visit). Derive the bit from flag 112 so changing
+    // back to the default outfit, and a loaded save, both come out right; flag 113
+    // then picks which outfit (saturn_emd_model_index). A borrowed Battle run keeps
+    // the save's.
+    if (g_bSaturnMode && !saturn_mode_is_borrowed() && entity_id < 2) {
+        if (Flg_ck((int)g_ScenarioFlags, SATURN_SCENARIO_FLAG_OUTFIT_1) != 0) {
+            g_main_state_flags2 |= MSF2_COSTUME_VARIANT;
+        } else {
+            g_main_state_flags2 &= ~MSF2_COSTUME_VARIANT;
+        }
+    }
+
+    // Port: an outfit chosen on the title screen's OPTIONS > BONUS page
+    // (Bonus.h). This part is the player's own model - ids 0, 1 and 3 loaded into
+    // the player entity - and it takes priority over every release's costume
+    // logic below, in the campaign and in the Battle Game alike, so none of the
+    // remaps run for it: the model is named by table row and tree instead.
+    // `plainPlayer` also covers the options page asking for the stock model,
+    // which must not pick up a costume flag an earlier game left set.
+    BonusModel bonusModel = { -1, "" };
+    const int isPlayerLoad = ((void*)em == (void*)&g_playerEntity) && entity_id < 4;
+    const int bonusOutfit = isPlayerLoad && bonus_player_model(entity_id, &bonusModel);
+    const int plainPlayer = bonusOutfit || (isPlayerLoad && bonus_preview_active());
+
+    // The same choice dresses the cutscene NPC of that character, as the DC's
+    // ADVANCED does. The NPC's own file is loaded as usual - it is what holds
+    // the cutscene animations - and the outfit's mesh and texture replace its
+    // own afterwards (LoadNpcOutfit), so the DC's remap is not taken for it.
+    BonusModel npcOutfitModel = { -1, "" };
+    const int npcOutfit = !isPlayerLoad && bonus_npc_model(entity_id, &npcOutfitModel);
+
     // Mod: g_bCostumeVariant 2 = the Saturn outfit, loaded from its own file
     // below; it uses the second outfit's table slot for everything else.
-    const bool saturnOutfit = (g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 &&
+    const bool saturnOutfit = !plainPlayer && !g_bSaturnMode &&
+                              (g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 &&
                               entity_id < 2 && g_bCostumeVariant == 2;
     const unsigned int costumeSlot = (g_bCostumeVariant == 2) ? 1u : (unsigned int)g_bCostumeVariant;
-    if ((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && entity_id < 2) {
+    if (!plainPlayer && (g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && entity_id < 2) {
         entity_id = (unsigned char)(costumeSlot + 0x33);
     }
 
     // DC ADVANCED remaps the player and three cutscene NPCs onto its own
     // outfit models, after the costume fixup exactly as the PS1 orders it.
-    if (g_bDcMode) {
+    if (!plainPlayer && !npcOutfit && g_bDcMode) {
         entity_id = dc_emd_advanced_index(entity_id);
+    }
+    // A Battle Game run from a DC ADVANCED save: only the player's outfit is
+    // remapped (never the NPC / Forest zombie rows), and the arrange models are
+    // read from the DC overlay for that one load.
+    const int dcOutfitLoad = !plainPlayer && !g_bDcMode && saturn_battle_dc_outfit() &&
+                             (entity_id < 2 || entity_id == DC_EMD_INDEX_COSTUME);
+    if (dcOutfitLoad) {
+        entity_id = dc_emd_advanced_index(entity_id);
+    }
+
+    // The Saturn's loader (Saturn GAME5 0x0604EA80) swaps the Hunter's model for
+    // the Tick's on stage index 2, before the table is read. The entity keeps
+    // type 6, so this only chooses which mesh is loaded.
+    if (!plainPlayer && g_bSaturnMode) {
+        entity_id = saturn_emd_model_index(entity_id);
     }
 
     // The port's table is the OG's; in DC mode a handful of indices name a
     // different file (dc/EntityModels.cpp). NULL = the table entry stands.
     const char* emdPath = g_emdPathTable[(g_playerEntity.id & 1) * 53 + entity_id];
-    if (g_bDcMode) {
+    if (bonusOutfit) {
+        emdPath = g_emdPathTable[bonusModel.row];
+    }
+    if (!plainPlayer && g_bDcMode) {
         const char* dcPath = dc_emd_path(entity_id, (unsigned char)(g_playerEntity.id & 1));
         if (dcPath != NULL) {
             emdPath = dcPath;
+        }
+    }
+    // Same shape in Saturn mode: the Saturn's table fills two of the PC's em100a
+    // placeholder slots. Both branches are mode-gated and the modes are
+    // exclusive, so the two never both answer for one index.
+    if (!plainPlayer && g_bSaturnMode) {
+        const char* saturnPath =
+            saturn_emd_path(entity_id, (unsigned char)(g_playerEntity.id & 1));
+        if (saturnPath != NULL) {
+            emdPath = saturnPath;
         }
     }
 
@@ -564,7 +845,24 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
     sprintf(FILE_PATH, "%s%s", GAME_DATA_ROOT, emdPath);
     SetSpriteBufferFlag();
 
+    // A load that has to come from one particular tree whatever the session's
+    // overlay is: the borrowed DC outfit above, and a bonus outfit, whose tree
+    // ("" = the base tree) is part of what names it - in DC mode the plain
+    // path "enemy/em1032.emd" would be the DC's model, not the PC's.
+    const char* loadOverlay = NULL;
+    if (dcOutfitLoad) loadOverlay = "DC";
+    if (bonusOutfit)  loadOverlay = bonusModel.overlay;
+    char savedOverlay[16] = "";
+    if (loadOverlay != NULL) {
+        strncpy(savedOverlay, GetAssetModeName(), sizeof(savedOverlay) - 1);
+        SetAssetMode(loadOverlay);
+    }
     unsigned int fileSize = LoadFile(FILE_PATH, g_loadDataDestPointer, 32);
+    // Port: the file's name for an HD skin (HdTextures.h), taken while the
+    // overlay the load used is still set, so it names the tree it came from.
+    char hdKey[128];
+    if (AssetSourceKey(FILE_PATH, hdKey, sizeof(hdKey)) == NULL) hdKey[0] = '\0';
+    if (loadOverlay != NULL) SetAssetMode(savedOverlay);
     int data_pointer = (int)g_loadDataDestPointer;
     {   // Mod: diagnostics (Man Spider crash)
         extern void crashlog_mark(const char* step);
@@ -572,8 +870,17 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
         sprintf(msg, "emd: %s idx=%d size=%u at %p", emdPath, (int)entity_id, fileSize, (void*)data_pointer);
         crashlog_mark(msg);
     }
+    if (fileSize != 0xFFFFFFFF) {
+        HdCheckModelBaseSkin(hdKey, emdPath, (const unsigned char*)data_pointer, fileSize);
+    }
 
     if ((g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 && costumeSlot - entity_id == (unsigned int)-51) {
+        entity_id = g_playerEntity.id & 1;
+    }
+    // The Saturn's own outfits sit at their own model indices (saturn/SaturnModels.h);
+    // the same fold-back to the player model, for whatever reads entity_id below.
+    if (g_bSaturnMode && (g_main_state_flags2 & MSF2_COSTUME_VARIANT) != 0 &&
+        saturn_emd_is_outfit(entity_id)) {
         entity_id = g_playerEntity.id & 1;
     }
 
@@ -585,6 +892,15 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
 
     unsigned int* puVar2 = (unsigned int*)(((fileSize & 0xFFFFFFFC) - 0x14) + data_pointer);
     g_loadDataDestPointer = (void*)(data_pointer + (*(unsigned int*)(((fileSize & 0xFFFFFFFC) - 4) + data_pointer) & 0xFFFFFFFC));
+
+    // Port: the directory is copied out and the model pointer kept apart,
+    // because an NPC outfit moves a second file's mesh and texture over the
+    // tail of this one - the directory included.
+    const unsigned int emdDir[4] = { puVar2[0], puVar2[1], puVar2[2], puVar2[3] };
+    int texDataPtr = (emdDir[3] & 0xFFFFFFFC) + data_pointer;
+    if (npcOutfit) {
+        LoadNpcOutfit(&npcOutfitModel, data_pointer, fileSize, &texDataPtr, hdKey, sizeof(hdKey));
+    }
 
     unsigned char entityType = ENTITY->id;
     if (entityType > 0x1f) {
@@ -608,21 +924,29 @@ void LoadEntityEMD(Entity* em, unsigned char entity_id)
             break;
     }
 
+    // Saturn Battle Game: arena 15's models are loaded gold (GAME5 0x0603BD0A).
+    if (g_bSaturnMode && g_saturnBattleActive) {
+        if (saturn_battle_tint_model_tim((unsigned char*)g_loadDataDestPointer)) {
+            hdKey[0] = '\0';        // an HD skin would undo the gold
+        }
+    }
+
+    TmdAsync_SetHdSource(g_loadDataDestPointer, hdKey);
     ProcessTmdAsync((unsigned int)g_loadDataDestPointer);
+    TmdAsync_SetHdSource(NULL, NULL);
 
     if ((DAT_004c1a2c >> (entityType & 0x1f) & 1) != 0) {
         QueueTextureForProcessing(bVar6, entityType);
     }
 
-    int texDataPtr = (puVar2[3] & 0xFFFFFFFC) + data_pointer;
     em->modelLoadBuffer = texDataPtr;
     ProcessTmdTextures(2, (unsigned int*)texDataPtr, bVar5, bVar6);
-    em->animBase = (puVar2[2] & 0xFFFFFFFC) + data_pointer;
-    em->animHeader = (puVar2[1] & 0xFFFFFFFC) + data_pointer;
+    em->animBase = (emdDir[2] & 0xFFFFFFFC) + data_pointer;
+    em->animHeader = (emdDir[1] & 0xFFFFFFFC) + data_pointer;
 
-    if (*puVar2 != 0) {
+    if (emdDir[0] != 0) {
         g_playerEntity.emdScratchPtr1 = data_pointer;
-        g_playerEntity.emdScratchPtr2 = (*puVar2 & 0xFFFFFFFC) + data_pointer;
+        g_playerEntity.emdScratchPtr2 = (emdDir[0] & 0xFFFFFFFC) + data_pointer;
     }
 }
 
@@ -708,6 +1032,8 @@ void LoadEquippedWeaponAnimation(unsigned char weapon_id, unsigned char param_2,
             weaponModel != 0 ? weaponModel
                              : g_weaponPathTable[g_playerEntity.id & 3][weapon_id]);
     SetSpriteBufferFlag();
+    char weaponPath[sizeof(FILE_PATH)];
+    strcpy(weaponPath, FILE_PATH);   // port: for WeaponTexture_Apply below
 
     unsigned int fileSize = LoadFile(FILE_PATH, (void*)anim_buffer, 32);
     g_playerEntity.jointMoveData0 = anim_buffer;
@@ -722,6 +1048,7 @@ void LoadEquippedWeaponAnimation(unsigned char weapon_id, unsigned char param_2,
     if (weapon_id == 0) {
         joint->anim_slot_ptr = g_playerEntity.weaponPartAnimSlot;
         joint->anim_object = (void*)g_playerEntity.weaponPartAnimObject;
+        WeaponTexture_Apply(NULL, 0, NULL);   // port: no weapon model, no gun texture
     } else {
         joint->anim_slot_ptr = (puVar1[1] & 0xFFFFFFFC) + (int)anim_buffer;
         unsigned char prevPage = g_TextureCurrentPage;
@@ -729,6 +1056,10 @@ void LoadEquippedWeaponAnimation(unsigned char weapon_id, unsigned char param_2,
         g_TextureCurrentPage = 7;
         g_TextureBankID = 0x16;
         ProcessTmdTextures(2, (unsigned int*)joint->anim_slot_ptr, 0x16, 7);
+        // Port: the gun's packets onto the weapon's own texture, when the
+        // migrator wrote one (WeaponTexture.h). Without it nothing changes.
+        WeaponTexture_Apply(weaponPath, g_playerEntity.id & 3,
+                            (unsigned int*)joint->anim_slot_ptr);
         g_TextureBankID = prevBank;
         g_TextureCurrentPage = prevPage;
         joint->anim_slot_ptr += 0xc;

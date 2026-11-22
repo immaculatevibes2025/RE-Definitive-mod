@@ -38,6 +38,8 @@ typedef enum MarniBlend : DWORD32 {
     MARNI_BLEND_ALPHA    = 0,   // src*srcA + dst*(1-srcA) — standard alpha blend
     MARNI_BLEND_ADD      = 1,   // src + dst (light/flash effects)
     MARNI_BLEND_DISABLE = 2,   // no blending — straight overwrite
+    MARNI_BLEND_ADD_ALPHA = 3, // src*srcA + dst — PS1 ABR 1/3 (B+F, B+F/4) with the
+                               // texel alpha as the transparent key
 } MarniBlend;
 
 // Port-added aspect modes (MarniDX::SetAspectMode, config.ini [Display] Aspect).
@@ -132,6 +134,7 @@ public:
     // this size and the rest of the back buffer stays the clear colour.
     void GetBackBufferSize(DWORD* outWidth, DWORD* outHeight) const;
 
+
     // Apply a new display mode (resize the swap chain). 0 on failure.
     int  ChangeDisplayMode(DWORD newWidth, DWORD newHeight, BOOL fullScreen);
 
@@ -209,6 +212,16 @@ public:
     // Returns TRUE on success.
     BOOL UpdateTexturePixels(MarniHandle tex, const void* pixelData,
                              int width, int height, int bpp);
+
+    // Port-only (HD textures): rebuild the texture behind `tex` from 32-bit
+    // RGBA pixels at a NEW size, keeping the handle, so a texture uploaded
+    // before its HD picture was decoded can take the picture later without
+    // anything that holds the handle noticing. TRUE on success.
+    BOOL ReplaceTexture(MarniHandle tex, int width, int height, const void* rgba32);
+
+    // A number that changes every time the slot behind `tex` is released, so
+    // a caller that kept a handle can tell it still names the same texture.
+    unsigned int TextureSerial(MarniHandle tex) const;
 
     // Return the dimensions of a live handle (fills *w/*h). No-op if invalid.
     void GetTextureSize(MarniHandle tex, int* outWidth, int* outHeight) const;

@@ -53,13 +53,29 @@ Path=
 
 [Game]
 Mode=OG
-; OG = the PC release (default); DC = the PS1 Director's Cut overlay.
+; OG = the PC release (default); DC = the PS1 Director's Cut overlay;
+; SATURN = the Sega Saturn release (needs the SATURN/ folder from the migrator).
 ; DC enables the PS1 staff-credit overlay automatically. Set this to 1 to use it
 ; with OG assets when DATA\STAFF.STF, DATA\STAFF2.STF and DATA\BIO.TIM are present.
 Ps1EndingCredits=0
 ; Set to 1 to let the movies the original leaves unskippable (the endings, the
 ; staff rolls, DMF and DME) be skipped with the usual buttons like any other FMV.
 SkipUnskippableFmv=0
+; 1 = PS1/Saturn USA rules in Mode=OG (second-run enemies, no auto-aim, 2 ink
+; ribbons per pick-up). Always on in Mode=SATURN and Mode=DC (except TRAINING).
+WesternDifficulty=0
+
+[Textures]
+; 1 = use the high-resolution replacements in the HD/ folder beside USA/: a file
+; HD/<hash>.webp is drawn in place of the texture whose pixels hash to that
+; name, at whatever resolution it has. Costs nothing while the folder does not
+; exist. A model's skin can also be named after its .EMD:
+; HD/USA/ENEMY/EM1010.webp. See docs/HD_TEXTURES.md.
+HdTextures=1
+; 1 = write every texture the game uploads to HD/dump/<hash>.png, once each,
+; and each model skin to HD/dump/<TREE>/<path>.png - the originals a
+; replacement set is made from. Leave it off for normal play.
+DumpTextures=0
 
 [Mods]
 ; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.

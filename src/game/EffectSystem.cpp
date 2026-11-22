@@ -25,9 +25,11 @@
 #include "Entities.h"
 #include "BioCard.h"
 #include "dc/ArrangeStages.h"   // room_effect_page_entry()
+#include "saturn/SaturnBattle.h"
 #include "../DebugPrint.h"
 #include <cstring>
 #include <cstdlib>
+#include "entities/EntityCommon.h"
 
 // ---------------------------------------------------------------------------
 // Cross-file symbols
@@ -46,6 +48,8 @@ extern unsigned char Effect_CreateBillboard(unsigned char type, unsigned char de
                                             short yaw, void* spriteInfo, void* pos,
                                             char lightFactor);       // PlayerAnimations.cpp
 extern const unsigned char g_RoomEffectSpriteTable[7 * 32 * 4]; // EffectSprites.cpp 0x004c48b8
+extern const int kWeaponSheetShiftedSrv;          // EffectSprites.cpp, port-only
+extern const unsigned char kEffectTexVHackShift;  // EffectSprites.cpp, 0x7b
 extern unsigned int g_entity_bkp;          // EntityCommon.cpp 0x00be0df4
 extern int  ProjectEffectSprite(SVECTOR* world, int* outxy);   // GteMatrix.cpp 0x0040aa50
 extern int  is_entity_in_switch_zone(VECTOR* position, void* zoneData); // Room.cpp 0x00462d90
@@ -731,7 +735,13 @@ static int effect_projectile_hit_check(int range, short x, short z)
     if (pPVar != NULL) {
         if (check_weapon_line_of_sight((VECTOR*)pPVar->scaMatrixData.localMatrix.t) == 0) {
             if (pPVar->isBeingAttackedFlag == 0) {
-                if ((g_EnemiesList[0].id == 3) || (g_EnemiesList[0].id == 4)) {
+                // Saturn Battle Game: the spiders' venom does not poison. GAME5
+                // 0x06049D4A-0x06049D56 tests the battle bit right after the
+                // id test and branches over the two rand() calls and the
+                // `+0xDC |= 2` / `+0x174 = 0x96` pair when it is set; the damage
+                // below is still applied. The run has no blue herb to cure it.
+                if (((g_EnemiesList[0].id == ENEMY_WEB_SPINNER) || (g_EnemiesList[0].id == ENEMY_BLACK_TIGER)) &&
+                    !(g_bSaturnMode && g_saturnBattleActive)) {
                     if ((g_RandSeed & 1) * ((unsigned int)g_RandSeed & 1) != 0) {
                         pPVar->healthStatusFlags |= 2;
                         *(unsigned char*)((char*)pPVar + 0x174) = 0x96;
@@ -2148,24 +2158,25 @@ static void effect_behavior_floor_stop1(void)
 }
 
 // ============================================================================
-// Behavior 54 (0x0040ead0) - random spin: give each rotation axis a random
-// speed of +-5 or +-15 (the even/odd bits of two draws).
+// Behavior 54 (0x0040ead0; PS1 SLUS_001.70 0x8001ef84, identical) - random
+// spin: every frame, give each axis of the velocity header a random speed of
+// +-5 or +-15. Two rand() draws per axis, six per frame: the first picks the
+// magnitude (even -> 15, odd -> 5), the second the sign (even -> -1).
 // ============================================================================
 static void effect_behavior_random_spin(void)
 {
     Effect* eff = &g_effectPool[g_activeEffectIndex];
 
-    // magnitude: even draw -> 15, odd -> 5; sign: even draw -> -1, odd -> +1
-    int mag = ((g_RandSeed & 1) == 0) ? 15 : 5;
-    int dir = ((g_RandSeed & 1) == 0) ? -1 : 1;
+    int mag = ((rand() & 1) == 0) ? 15 : 5;
+    int dir = ((rand() & 1) == 0) ? -1 : 1;
     eff->rotSpeedX = (short)(mag * dir);
 
-    mag = ((g_RandSeed & 1) == 0) ? 15 : 5;
-    dir = ((g_RandSeed & 1) == 0) ? -1 : 1;
+    mag = ((rand() & 1) == 0) ? 15 : 5;
+    dir = ((rand() & 1) == 0) ? -1 : 1;
     eff->rotSpeedY = (short)(mag * dir);
 
-    mag = ((g_RandSeed & 1) == 0) ? 15 : 5;
-    dir = ((g_RandSeed & 1) == 0) ? -1 : 1;
+    mag = ((rand() & 1) == 0) ? 15 : 5;
+    dir = ((rand() & 1) == 0) ? -1 : 1;
     eff->rotSpeedZ = (short)(mag * dir);
 }
 
@@ -2486,7 +2497,15 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
     unsigned char* uv = (unsigned char*)eff->uvDataBackup;
 
     // ---- texture descriptor (0x0047c6d8-0x0047c79b) ----
-    g_TextureDesc.flags = ((unsigned int)(eff->animHeader[10] >> 6) << 0x16) | 0x40;
+    // The header WORD at +0x32 (animHeader[10..11]), not its low byte:
+    // 0x0047c6df `MOV AX,[+0x32]; SHR AX,6; SHL EAX,0x16; MOV AL,0x40` (PS1
+    // EffectActor_UpdateAndRender: the same ushort >> 6 << 0x16). Header bit k
+    // lands on GsSPRITE attribute bit k+16: bits 12-13 are the semi-
+    // transparency rate (28-29) and bit 14 - animHeader[11] & 0x40 - its enable
+    // (30). Reading only the byte dropped all of animHeader[11], so every
+    // semi-transparent effect (the shoot-the-camera glass, header 0x4003) drew
+    // opaque.
+    g_TextureDesc.flags = ((unsigned int)(AH_USHORT(eff, 10) >> 6) << 0x16) | 0x40;
     g_TextureDesc.width = (unsigned short)*(unsigned char*)(eff->vramInfoBackup + 2);
     g_TextureDesc.height = (unsigned short)*(unsigned char*)(eff->vramInfoBackup + 3);
     g_TextureDesc.pivotX = 0x80 - (unsigned short)uv[2];
@@ -2586,12 +2605,35 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
 
     int tint = (int)g_TextureDesc.clutY;
 
+    // ---- room 70C (the second Yawn fight): tint 1/2 sprites in page rows
+    // (0x1a, 99) sample the art 0x7b rows lower, at tint 0 ----
+    //
+    // In that room the band is the ember sheet (type 0x0e, page 1 rows 27..99)
+    // and 0x7b rows below it the page carries the same frames as beige dust:
+    // the Yawn's floor-break puffs (tint 2) draw as dust, not fire.
+    //
+    // The test is on the PAGE-ABSOLUTE V. Weapon sheets keep sprite-local UVs
+    // in the port (bandV adds the page offset back), and their SRV is only the
+    // sheet's own rows, so the shift cannot be done on texV: the sheet is
+    // served from its shifted bake (SRV kWeaponSheetShiftedSrv + slot, made by
+    // RebakeWeaponSheetsForRoom in this room) instead. Room sheets are whole
+    // pages with absolute UVs and shift as in the original.
+    //
+    // clutTint follows the reset: the port's per-tint CLUT row and PS1 blend
+    // row (below) must serve tint 0's art, as the original does.
+    int clutTint = tint;
+    bool texVShifted = false;
     if (texVHack && (g_stageId == STAGE_MANSION_RETURN_2F) && (g_roomId == ROOM_LESSON_ROOM)
         && ((tint == 2) || (tint == 1))
-        && (0x1a < g_TextureDesc.texV)
-        && ((unsigned short)(g_TextureDesc.texV + g_TextureDesc.height) < 99)) {
-        g_TextureDesc.texV = (unsigned char)(g_TextureDesc.texV + 0x7b);
+        && (0x1a < bandV)
+        && ((unsigned short)(bandV + g_TextureDesc.height) < 99)) {
+        if (g_effectSpriteSheetSlot[eff->effectType] < 8) {
+            texVShifted = true;
+        } else {
+            g_TextureDesc.texV = (unsigned char)(g_TextureDesc.texV + kEffectTexVHackShift);
+        }
         tint = 0;
+        clutTint = 0;
     }
 
     if (colorIdx >= 60) return;   // port-only guard
@@ -2678,8 +2720,10 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
     // does the enemy colouring ----
     //
     // the OG's effect path serves page variant 0 - SubmitEffectSprite 
-    // (0x0046d9b0) indexes g_TexturePageTable[textureId*223] with no variant, 
-    // and GetTextureVariant is always 0 for effect descriptors.
+    // (0x0046d9b0) indexes g_TexturePageTable[textureId*223] with no variant;
+    // a semi-transparent effect descriptor does report a variant (the PS1 blend
+    // bits above), but SubmitEffectSprite only turns that into
+    // SPRITE_FLAG_VARIANT, never into a page variant.
     // The per-tint CLUT-row redirect lives ONLY in
     // AddSprite_Ex/AddTintSprite_Ex (room static sprites). The old
     // port-side redirect (SRV 120+sheetSlot*4+clutRow) fabricated that
@@ -2711,10 +2755,16 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
     // (row-1); row 0 stays on the plain page SRVs 11-14. Single-row room
     // sheets (g_effectSpriteClutRows[type] <= 1) are untouched and keep
     // rendering their base palette from the page SRV.
+    if (texVShifted) {
+        // the room 70C shifted band (see above); without it the plain sheet
+        // stays, as before
+        int shifted = kWeaponSheetShiftedSrv + (int)sheetSlot;
+        if (g_TexturePageSRV[shifted] != MARNI_NULL_HANDLE) texSlot = shifted;
+    }
     if (sheetSlot >= 8) {
         int rows = (int)g_effectSpriteClutRows[eff->effectType];
         if (rows > 1) {
-            int clutRow = (int)g_TextureDesc.clutY;
+            int clutRow = clutTint;
             if (clutRow > rows - 1) clutRow = rows - 1;
             if (clutRow > 3) clutRow = 3;
             if (clutRow > 0) {
@@ -2730,9 +2780,32 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
         }
     }
 
+    // ---- port-only: the PS1 blend ----
+    //
+    // The PS1 has no band-table blend for effects: EffectActor_UpdateAndRender
+    // (SLUS_001.70 0x80022d58) hands the GsSPRITE straight to GsSortSprite, and
+    // the GPU blends it from the attribute word built above - bit 30 enables
+    // semi-transparency, bits 28-29 pick the rate (ABR) - and only for texels
+    // whose CLUT entry carries STP. The PC instead takes blendMode from
+    // g_EffectBlendTable and ignores the attribute (the descriptor's variant only
+    // sets SPRITE_FLAG_VARIANT, which nothing reads), so the shoot-the-camera
+    // glass (header 0x4003, CLUT row 2 all STP) drew opaque. The port follows
+    // the PS1 rule for every effect; the shipped data uses ABR 0 and ABR 3 only.
+    int ps1Blend = EFFECT_BLEND_OPAQUE;
+    {
+        unsigned int attr = AH_USHORT(eff, 10);
+        unsigned int row = (unsigned int)clutTint;
+        if (row > 3) row = 3;
+        if ((attr & 0x4000) != 0 && eff->effectType < 50
+            && ((g_effectSpriteStpRows[eff->effectType] >> row) & 1) != 0) {
+            ps1Blend = (int)((attr >> 12) & 3);
+        }
+    }
+
     int submitted = SubmitEffectSprite(&g_TextureDesc, (int)depthArg, texSlot,
                                        color[0], color[1], color[2],
-                                       scaleXadd, scaleYadd, (int)blendMode, (short)brightness);
+                                       scaleXadd, scaleYadd, (int)blendMode, (short)brightness,
+                                       ps1Blend);
     (void)submitted;
 
     unsigned int depthSort = depth >> 4;
@@ -2749,9 +2822,9 @@ static void effect_submit_sprite(Effect* eff, short screenX, short screenY,
 // projected, and the velocity header advanced. The sprite animation is stepped
 // and the sprite submitted.
 //
-// Effects whose header lacks bit 1 keep whatever position the stack had in the
-// original; the port zeroes that scratch so the zone test deterministically
-// rejects them instead of randomly drawing at a stale spot.
+// Frames whose header lacks bit 1 keep whatever world AND screen position the
+// stack had in the original; the port stands in the slot's last stored world
+// position for both (see local_10 and the re-projection before the submit).
 // ============================================================================
 void EffectActor_UpdateAndRender(void)
 {
@@ -2848,6 +2921,28 @@ void EffectActor_UpdateAndRender(void)
     if ((eff->animHeader[11] & 0x80) != 0) return;
 
     if (is_entity_in_switch_zone(&local_10, g_CurrentRdtDataTypePtr) == 0) return;
+
+    // The screen position is stale stack in the original too (0x0047c2f0:
+    // [esp+0x14] is only written by the transform branch), and its residue is
+    // the projection of the same last position local_10 is seeded with. Left at
+    // {0,0} it is the SCREEN CENTRE (callers pass centred coordinates), so every
+    // frame whose phase had the transform bit clear drew the sprite there - in
+    // ROOM1000 camera 0 the sword key's sparkle blinked as a white dot on the
+    // hall door until the key was picked up. Re-project the same position the
+    // zone test just accepted, through the same camera setup as the transform
+    // branch; projDepth/depthScaled keep the values that branch stored.
+    if ((eff->animHeader[10] & 2) == 0) {
+        SVECTOR lastPos;
+        lastPos.x = (short)local_10.x;
+        lastPos.y = (short)local_10.y;
+        lastPos.z = (short)local_10.z;
+        lastPos.pad = 0;
+        GetMatrixTranslation(&g_RoomCameraData);
+        SetGlobalScaledRotationMatrix(&g_RoomCameraData);
+        ProjectEffectSprite(&lastPos, (int*)&local_1c);
+        local_1c.x -= 0xa0;
+        local_1c.y -= 0x78;
+    }
 
     effect_submit_sprite(eff, local_1c.x, local_1c.y,
                          (int)(unsigned short)eff->depthScaled + 1,

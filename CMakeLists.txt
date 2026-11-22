@@ -36,6 +36,8 @@ set(RE1_SOURCES
     src/system/AssetPath.cpp
     src/system/AudioFile.cpp
     src/system/PngImage.cpp
+    src/system/WebpImage.cpp
+    src/system/HdTextures.cpp
     src/system/ConfigFile.cpp
 
     src/marni/MarniBits.cpp
@@ -45,6 +47,7 @@ set(RE1_SOURCES
 
     src/video/VideoPlayback.cpp
 
+    src/game/Bonus.cpp
     src/game/CharacterSelectionScreen.cpp
     src/game/CmdFunctions.cpp
     src/game/CollisionDebug.cpp
@@ -80,9 +83,11 @@ set(RE1_SOURCES
     src/game/OptionsMenu.cpp
     src/game/PathTrail.cpp
     src/game/PlayerAnimations.cpp
+    src/game/HdText.cpp
     src/game/PrintText.cpp
     src/game/Rendering.cpp
     src/game/Room.cpp
+    src/game/RoomBackgroundWebp.cpp
     src/game/RoomCollision.cpp
     src/game/RoomEvents.cpp
     src/game/RoomInit.cpp
@@ -93,10 +98,13 @@ set(RE1_SOURCES
     src/game/SpriteRenderer.cpp
     src/game/TaskScheduler.cpp
     src/game/TextureLoader.cpp
+    src/game/TitleMenuFont.cpp
     src/game/TitleScreen.cpp
     src/game/TmdAnimation.cpp
     src/game/TmdRenderer.cpp
     src/game/WeaponDamage.cpp
+    src/game/WeaponTexture.cpp
+    
     src/game/dc/WeaponDamageTables.cpp
     src/game/dc/ItemTables.cpp
     src/game/dc/ItemNames.cpp
@@ -106,6 +114,13 @@ set(RE1_SOURCES
     src/game/dc/EntityModels.cpp
     src/game/dc/ArrangeStages.cpp
     src/game/dc/ArrangeSoundRows.cpp
+
+    src/game/saturn/SaturnBattle.cpp
+    src/game/saturn/SaturnModels.cpp
+    src/game/saturn/SaturnRoomObjects.cpp
+    src/game/saturn/SaturnTick.cpp
+    src/game/saturn/SaturnTickAnim.cpp
+    src/game/saturn/SaturnTyrant.cpp
 
     src/game/entities/Adder.cpp
     src/game/entities/BlackTiger.cpp
@@ -181,7 +196,13 @@ if(RE1_M32_LIBDIR STREQUAL "")
 endif()
 message(STATUS "32-bit library directory: ${RE1_M32_LIBDIR}")
 
-target_compile_options(residentevil PRIVATE -m32 -w)
+# -fno-strict-aliasing / -fno-strict-overflow: the decomp keeps the original's
+# MSVC assumptions - model/TMD/matrix data is read by casting raw buffers to
+# structs, and Ghidra-derived signed math relies on wrap-around. GCC's -O2
+# optimises on both being impossible; with them on, a Release build drew no 3D
+# models at all (backgrounds fine) on Arch's GCC.
+target_compile_options(residentevil PRIVATE -m32 -w
+    -fno-strict-aliasing -fno-strict-overflow)
 # -rdynamic: keep the dynamic symbol table so crash.cpp's backtrace can
 # name functions instead of printing bare addresses.
 # -L ahead of every library: the linker takes the first -L that matches, so the
@@ -247,7 +268,11 @@ re1_link_32bit(swresample RE1_SWRESAMPLE_LIB)
 # only add a link-time requirement the lib32 packages need not satisfy (Arch's
 # lib32-mesa ships no unversioned libGL.so). The GL runtime the context needs
 # is dlopen'd by SDL at startup, not at link time.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 target_link_libraries(residentevil PRIVATE
     ${RE1_SDL2_LIB}
     ${RE1_AVFORMAT_LIB} ${RE1_AVCODEC_LIB} ${RE1_AVUTIL_LIB} ${RE1_SWRESAMPLE_LIB}
+    # std::thread: the HD texture decode worker (src/system/HdTextures.cpp).
+    Threads::Threads
     m)
