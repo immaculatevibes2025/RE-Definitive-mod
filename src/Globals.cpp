@@ -2028,7 +2028,6 @@ int            g_DcDifficulty = DC_DIFFICULTY_STANDARD;
 bool           g_bPs1EndingCredits = false;
 bool           g_bPs1FmvSubtitles = false;
 bool           g_bSkipUnskippableFmv = false;
-bool           g_bModTicks = false;
 bool           g_bBattleAlwaysUnlocked = false;
 bool           g_bSaturnBattleGame = false;
 bool           g_bWesternDifficultyOption = false;

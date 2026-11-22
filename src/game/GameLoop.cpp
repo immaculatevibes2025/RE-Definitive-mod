@@ -204,7 +204,7 @@ LAB_00480d7c:
                 // fires the script's event branch (fade-out, cutscene) the
                 // moment a bit is toggled, blacking the background.
                 // g_debugMenuOpen stays 0 while debug features are disabled.
-                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
+                if (g_debugMenuOpen == 0) {
                     run_command_functions((unsigned short*)g_RoomScdOpcodes);
                     room_events_check();
                     room_state_reset();
@@ -279,13 +279,6 @@ LAB_00480d7c:
                     g_debugMenuOpen = 0;
                 }
 
-                // Port-added: F2 opens the Video Options overlay
-                // (VideoMenu.cpp). It pauses exactly like the debug menu -
-                // every pause check below reads g_videoMenuOpen beside
-                // g_debugMenuOpen - and stays shut while that menu is up.
-                // Mod: the F2 overlay is retired - video settings now live
-                // in Option Mode's VIDEO tab.
-                g_videoMenuOpen = 0;
                 if (((g_playerEntity.isBeingAttackedFlag == 0) &&
                      ((g_message_flags & 0x100) != 0) &&
                      ((g_message_flags & 0x40) != 0) &&
@@ -318,7 +311,7 @@ LAB_00480e89:
                 // enemy is dead by then, but a dead Tyrant keeps drawing its
                 // death debris (the blown-off joints, heart, claw trail) from
                 // its own update - the ending shows only the player.
-                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0 && g_battleEndingCam == 0) {
+                if (g_debugMenuOpen == 0 && g_battleEndingCam == 0) {
                     update_entities();
                 }
 
@@ -345,7 +338,7 @@ LAB_00480e89:
                 // queue only holds the menu box + text (drawn over the last
                 // presented frame) and nothing draws on top of the menu.
                 // g_debugMenuOpen stays 0 while debug features are disabled.
-                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
+                if (g_debugMenuOpen == 0) {
                     // Mod: the Battle Game's ending shot draws the player and
                     // nothing else - no fade sprites (shadows, blood pools), no
                     // room objects, no enemies, no 2D effects, no room masks.
@@ -419,7 +412,7 @@ LAB_00480e89:
 
                 // Mod: Saturn Battle Game - timer, HUD, room clear / next room,
                 // the results at the end. Paused with the rest of the game.
-                if (g_debugMenuOpen == 0 && g_videoMenuOpen == 0) {
+                if (g_debugMenuOpen == 0) {
                     battle_frame();
                 }
 

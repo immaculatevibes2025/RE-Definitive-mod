@@ -404,7 +404,7 @@ DWORD PlayerPad_Update(void)
 	// the keyboard directly and is unaffected. g_debugMenuOpen stays 0 while
 	// debug features are disabled.
 	// Mod: also while the Battle Game's ending camera circles the player.
-	if (g_debugMenuOpen != 0 || g_videoMenuOpen != 0 || g_battleEndingCam != 0) {
+	if (g_debugMenuOpen != 0 || g_battleEndingCam != 0) {
 		g_PlayerPadPressed = 0;
 		g_PlayerPadHeld = 0;
 		g_PlayerDpadHeld = 0;

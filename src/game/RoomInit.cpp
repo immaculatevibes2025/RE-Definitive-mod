@@ -58,8 +58,12 @@ static int wardrobe_room(void)
 {
     // DC too: its STANDARD/TRAINING wardrobe is the same USA ROOM11C0/1 (the
     // ADVANCED arrange room is a different file, so room_file_stage() rules it out).
-    return !g_battleActive && room_file_stage() == 0 && g_roomId == 0x1C;
+    // Not in Mode=SATURN: that release's own wardrobe (migrator-patched
+    // ROOM11C, scenario flags 112/113) already offers the Saturn outfits.
+    return !g_battleActive && !g_bSaturnMode && room_file_stage() == 0 && g_roomId == 0x1C;
 }
+
+int wardrobe_saturn_room(void) { return wardrobe_room(); }   // PlayerAnimations.cpp
 
 static void wardrobe_set_event(int slot, int script)
 {

@@ -50,12 +50,11 @@ const OwnedKey kOwnedKeys[] = {
     { "Sound",   "MusicVolume" },    // port-added (title OPTIONS > SOUND OPTIONS)
     { "Sound",   "EffectsVolume" },  // port-added (title OPTIONS > SOUND OPTIONS)
     { "Sound",   "VoiceVolume" },    // port-added (Option Mode > SOUND)
-    { "Mods",    "Ticks" },          // port-added (Option Mode > GAMEPLAY)
     { "Mods",    "QuickKnife" },     // port-added (Option Mode > GAMEPLAY)
     { "Mods",    "QuickTurn" },      // port-added (Option Mode > GAMEPLAY)
     { "Mods",    "Reload" },         // port-added (Option Mode > GAMEPLAY)
     { "Input",   "PadDef" },         // port-added: the GAME PAD bindings (g_JoyRemapTbl[1])
-    { "Display", "Interpolate60" },  // port-added (Option Mode > VIDEO, F2 menu)
+    { "Display", "Interpolate60" },  // port-added (Option Mode > VIDEO)
 };
 const int kOwnedKeyCount = (int)(sizeof(kOwnedKeys) / sizeof(kOwnedKeys[0]));
 
@@ -484,8 +483,6 @@ void ConfigFile_EnsureExists(void)
         "DumpTextures=0\n"
         "\n"
         "[Mods]\n"
-        "; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.\n"
-        "Ticks=0\n"
         "; Option Mode > GAMEPLAY: 1 = on.\n"
         "QuickKnife=0\n"
         "QuickTurn=0\n"
@@ -665,8 +662,6 @@ BOOL ConfigFile_Load(void)
     // Mod: Saturn Ticks replace Hunters. OG content only - the DC overlay
     // uses em1016 for its own zombie model.
     // DC too: the Tick model is read from TK1016/TK1116 there (EntityModelLoader).
-    g_bModTicks = ReadInt(path, "Mods", "Ticks", 0) != 0;
-    if (g_bModTicks) dbg_printf("[CONFIG] mod: Saturn Ticks enabled\n");
     g_bTickAlwaysDecap = ReadInt(path, "Mods", "TickAlwaysDecapitate", 0) != 0;
     g_bInterpolate60   = ReadInt(path, "Display", "Interpolate60", 0) ? TRUE : FALSE;
     // Mod: the Saturn Battle Game is offered on the title once the game has
@@ -760,16 +755,15 @@ static void SaveKeys(BOOL gameSettings, int gameMode, int regionJpn)
     snprintf(values[12], sizeof(values[12]), "%u", (unsigned)g_dwMusicVolume);
     snprintf(values[13], sizeof(values[13]), "%u", (unsigned)g_dwEffectsVolume);
     snprintf(values[14], sizeof(values[14]), "%u", (unsigned)g_dwVoiceVolume);
-    snprintf(values[15], sizeof(values[15]), "%d", g_bModTicks ? 1 : 0);
-    snprintf(values[16], sizeof(values[16]), "%d", g_bQuickKnife ? 1 : 0);
-    snprintf(values[17], sizeof(values[17]), "%d", g_bQuickTurn ? 1 : 0);
-    snprintf(values[18], sizeof(values[18]), "%d", g_bReloadButton ? 1 : 0);
+    snprintf(values[15], sizeof(values[15]), "%d", g_bQuickKnife ? 1 : 0);
+    snprintf(values[16], sizeof(values[16]), "%d", g_bQuickTurn ? 1 : 0);
+    snprintf(values[17], sizeof(values[17]), "%d", g_bReloadButton ? 1 : 0);
     {
         char padHex[128 * 2 + 1];
         HexEncode((const BYTE*)g_JoyRemapTbl[1], 128, padHex);
-        snprintf(values[19], sizeof(values[19]), "%s", padHex);
+        snprintf(values[18], sizeof(values[18]), "%s", padHex);
     }
-    snprintf(values[20], sizeof(values[20]), "%d", g_bInterpolate60 ? 1 : 0);
+    snprintf(values[19], sizeof(values[19]), "%d", g_bInterpolate60 ? 1 : 0);
 
     for (int i = 0; i < kOwnedKeyCount; ++i) {
         SetValue(kOwnedKeys[i].section, kOwnedKeys[i].key, values[i], lines, &count);

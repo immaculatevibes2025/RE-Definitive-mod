@@ -78,8 +78,6 @@ HdTextures=1
 DumpTextures=0
 
 [Mods]
-; 1 = Sega Saturn Ticks in place of the Hunters from the courtyard.
-Ticks=0
 QuickKnife=0
 QuickTurn=0
 Reload=0

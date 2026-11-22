@@ -899,8 +899,7 @@ void OT_InsertPrimitive(void* prim, unsigned int depth)
     // so don't drop the bg while it is open - its flag editor can set this
     // very bit (g_main_state_flags is flag bank 5), which blacked the screen.
     // g_debugMenuOpen stays 0 while debug features are disabled.
-    if ((g_main_state_flags & MSF_SCREEN_STANDALONE) != 0 && g_debugMenuOpen == 0 &&
-        g_videoMenuOpen == 0) {
+    if ((g_main_state_flags & MSF_SCREEN_STANDALONE) != 0 && g_debugMenuOpen == 0) {
         return;
     }
     if (g_pendingSpriteCount >= MAX_PENDING_SPRITES) return;

@@ -49,7 +49,6 @@ static SDL_Scancode VkToScancode(int vk)
     case VK_DOWN:     return SDL_SCANCODE_DOWN;
     case VK_SNAPSHOT: return SDL_SCANCODE_PRINTSCREEN;
     case VK_F1:       return SDL_SCANCODE_F1;
-    case VK_F2:       return SDL_SCANCODE_F2;
     case VK_F6:       return SDL_SCANCODE_F6;
     case VK_F8:       return SDL_SCANCODE_F8;
     case VK_F9:       return SDL_SCANCODE_F9;

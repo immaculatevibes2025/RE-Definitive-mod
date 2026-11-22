@@ -486,7 +486,6 @@ extern bool          g_bSkipUnskippableFmv;    // [Game] SkipUnskippableFmv
 // Mod: Sega Saturn Ticks in place of Hunters ([Mods] Ticks). Loads
 // enemy/em1016.emd / em1116.emd for entity type 6 when present, and runs the
 // Saturn Tick's close-range decapitation logic (entities/Hunter.cpp). OG only.
-extern bool          g_bModTicks;              // [Mods] Ticks
 // Mod: the Sega Saturn Battle Game is on the title menu even before the game
 // has been finished ([BattleGame] AlwaysUnlocked). See game/BattleGame.cpp.
 extern bool          g_bBattleAlwaysUnlocked;  // [BattleGame] AlwaysUnlocked
@@ -674,11 +673,9 @@ int  re1_rand(void);
 extern int g_battleActive;          // BattleGame.cpp
 // [BattleGame] Ticks=1 swaps every Battle Game Hunter for a Tick instead.
 extern bool g_bBattleTicks;         // ConfigFile.cpp
-// Off in Saturn mode (Mode=SATURN): that release runs its own Tick
-// (saturn/SaturnTick.cpp) on the Saturn's own data.
-#define mod_ticks_active() (!g_bSaturnMode && \
-                            ((g_bModTicks && get_stage_id() == MOD_TICKS_STAGE && !g_battleActive) || \
-                             (g_bBattleTicks && g_battleActive)))
+// The campaign's Ticks are Mode=SATURN's own (saturn/SaturnTick.cpp); the
+// mod's Tick runs only in its Battle Game, with [BattleGame] Ticks=1.
+#define mod_ticks_active() (!g_bSaturnMode && g_bBattleTicks && g_battleActive)
 
 // The same fold applied to a stage id that is not g_stageId - the one the FILE
 // paths use, which in ADVANCED can be the arrange twin of the stage the game
@@ -803,8 +800,6 @@ extern int           g_debugTextureViewerOpen;   // 1 while the overlay is activ
 int texture_viewer_overlay(void);                 // DebugScreens.cpp - per-frame overlay; 0 when closed
 extern int           g_debugMenuOpen;            // 1 while the F1 debug menu overlay is open
 int debug_menu_overlay(void);                     // DebugMenu.cpp - F1 overlay; 1 while open
-extern int           g_videoMenuOpen;            // 1 while the F2 Video Options overlay is open (pauses like F1)
-int video_menu_overlay(void);                     // VideoMenu.cpp - F2 overlay; 1 while open
 void DebugRoomChange_ApplyPendingPlacement(void); // DebugMenu.cpp - post room_transition_load placement
 extern int           g_debugLoadSlot;             // quick access load: selected slot index (0-7)
 void DebugQuick_SaveSlot(int slot);               // DebugSaveLoad.cpp - write a full save to savedat<slot+1>.dat

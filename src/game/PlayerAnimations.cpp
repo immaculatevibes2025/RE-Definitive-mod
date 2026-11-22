@@ -7272,7 +7272,8 @@ int create_room_event(unsigned char* entry)
     {
         extern int g_wardrobeSaturnPending;
         extern unsigned char g_RoomActionTable[288];
-        if (!g_bDcMode && room_file_stage() == 0 && g_roomId == 0x1C) {
+        extern int wardrobe_saturn_room(void);   // RoomInit.cpp - same test as the setup
+        if (wardrobe_saturn_room()) {
             g_wardrobeSaturnPending = (entry == &g_RoomActionTable[3 * 0xc]);
         }
     }
